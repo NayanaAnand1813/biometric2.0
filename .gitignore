@@ -13,3 +13,7 @@ dist/
 
 # Editor
 .vscode/
+
+# Biometric face images and generated embeddings
+backend/cropped_faces/
+backend/embeddings/
