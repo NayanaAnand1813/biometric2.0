@@ -51,6 +51,21 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+def startup_event():
+    """
+    On FastAPI server startup, initialize the in-memory FAISS IndexFlatIP(512)
+    from PostgreSQL. PostgreSQL remains the permanent source of truth.
+    """
+    try:
+        from faiss_service import get_faiss_manager
+        faiss_mgr = get_faiss_manager()
+        count = faiss_mgr.initialize_from_database()
+        print(f"[STARTUP] Initialized FAISS index with {count} enrolled user embeddings.")
+    except Exception as e:
+        print(f"[STARTUP WARNING] Could not initialize FAISS from database: {e}")
+
+
 @app.get("/")
 def home():
     return {"message": "Biometric Backend is Running"}
@@ -178,17 +193,133 @@ async def get_user_endpoint(user_id: str):
     return user_data
 
 
+from generate_embedding import extract_face_embedding
+from faiss_service import get_faiss_manager
+
+
+def get_biometric_threshold() -> float:
+    """
+    Retrieves the configurable cosine similarity threshold.
+    NOTE: The default (0.70) is an empirical test threshold and MUST undergo
+    formal empirical calibration (FAR/FRR/EER evaluation using genuine and impostor
+    distributions) prior to production deployment.
+    """
+    raw_val = os.getenv("BIOMETRIC_COSINE_THRESHOLD", "0.70")
+    try:
+        val = float(raw_val)
+        if not (0.0 < val < 1.0):
+            raise ValueError("Threshold must be strictly between 0.0 and 1.0.")
+        return val
+    except Exception as e:
+        print(f"[CONFIG WARNING] Invalid BIOMETRIC_COSINE_THRESHOLD '{raw_val}': {e}. Falling back to 0.70.")
+        return 0.70
+
+
+def _process_login_sync(clean_user_id: str, img: np.ndarray, image_size_bytes: int) -> dict:
+    """
+    Synchronous worker executed in worker threadpool for biometric login:
+    1. BlazeFace face detection in memory (thread-safe under _detector_lock).
+    2. In-memory face cropping (never saved to disk).
+    3. FaceNet 512-D L2-normalized embedding extraction via shared extract_face_embedding.
+    4. Exact 1:N FAISS IndexFlatIP cosine similarity search under _lock.
+    5. Identity matching: Top matching FAISS user_id must equal submitted user_id,
+       and similarity score must meet or exceed the configurable threshold.
+    6. Return clean authenticated / denied response (no raw similarity scores exposed).
+    """
+    # 1. Convert BGR to RGB for MediaPipe
+    rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(
+        image_format=mp.ImageFormat.SRGB,
+        data=rgb_image
+    )
+
+    # 2. Thread-safe face detection
+    with _detector_lock:
+        detection_result = detector.detect(mp_image)
+
+    if not detection_result.detections:
+        return {
+            "status": "error",
+            "error_type": "no_face",
+            "message": "No face detected in the captured image. Please center your face and try again."
+        }
+
+    # 3. Crop first detected face in memory (NO disk write)
+    detection = detection_result.detections[0]
+    bbox = detection.bounding_box
+    x = max(0, bbox.origin_x)
+    y = max(0, bbox.origin_y)
+    w = max(1, bbox.width)
+    h = max(1, bbox.height)
+
+    cropped_face = img[y:y+h, x:x+w]
+    if cropped_face.size == 0:
+        return {
+            "status": "error",
+            "error_type": "no_face",
+            "message": "No face detected in the captured image."
+        }
+
+    # 4. Extract 512-D L2-normalized embedding using shared pipeline (in memory)
+    try:
+        probe_embedding = extract_face_embedding(cropped_face)
+    except Exception as emb_err:
+        return {
+            "status": "error",
+            "error_type": "embedding_failed",
+            "message": f"Failed to extract biometric features: {emb_err}"
+        }
+
+    # 5. Search FAISS index for top matching enrolled identity
+    faiss_mgr = get_faiss_manager()
+    top_matches = faiss_mgr.search_top_k(probe_embedding, k=1)
+    threshold = get_biometric_threshold()
+
+    if not top_matches:
+        # FAISS index is empty or has no enrolled users
+        print(f"[AUTH DENIED] FAISS index is empty. Denying authentication for claimed ID '{clean_user_id}'.")
+        return {
+            "status": "failed",
+            "authenticated": False,
+            "message": "Biometric verification failed. Face does not match registered user."
+        }
+
+    top_user_id, similarity = top_matches[0]
+
+    # 6. Verify top matching FAISS user ID == submitted user_id AND similarity >= threshold
+    if top_user_id == clean_user_id and similarity >= threshold:
+        print(f"[AUTH SUCCESS] User '{clean_user_id}' authenticated. Score: {similarity:.4f} >= Threshold: {threshold:.4f}")
+        return {
+            "status": "success",
+            "authenticated": True,
+            "user_id": clean_user_id,
+            "message": f"Biometric authentication successful. Welcome, {clean_user_id}!",
+            "image_size_bytes": image_size_bytes
+        }
+    else:
+        print(
+            f"[AUTH DENIED] Claimed: '{clean_user_id}', Top Match: '{top_user_id}', "
+            f"Similarity: {similarity:.4f}, Threshold: {threshold:.4f}"
+        )
+        return {
+            "status": "failed",
+            "authenticated": False,
+            "message": "Biometric verification failed. Face does not match registered user."
+        }
+
+
 @app.post("/login")
-async def login_image_endpoint(
+async def login_endpoint(
     user_id: str = Form(...),
     image: UploadFile = File(...)
 ):
     """
-    Milestone 6 Login Capture endpoint:
-    Receives User ID and face image from the frontend login interface.
-    Validates user_id and image integrity. Confirms receipt to frontend.
-    Note: Face detection, embedding generation, FAISS similarity matching,
-    and authentication decisions are strictly deferred to Milestone 7.
+    Milestone 7 Wave 2 Biometric Authentication Endpoint:
+    Receives User ID and face image from frontend.
+    Offloads in-memory face detection, shared FaceNet embedding, and FAISS exact
+    search to the worker threadpool.
+    Does not save login images or embeddings to disk or database.
+    Does not expose raw similarity scores to the client.
     """
     clean_user_id = user_id.strip() if user_id else ""
     if not clean_user_id:
@@ -205,7 +336,7 @@ async def login_image_endpoint(
             detail={"error": "Empty file", "message": "Uploaded image file is empty."}
         )
 
-    # Decode and validate image using OpenCV
+    # Decode and validate image in memory using OpenCV (no disk write)
     np_array = np.frombuffer(image_data, np.uint8)
     img = cv2.imdecode(np_array, cv2.IMREAD_COLOR)
 
@@ -215,10 +346,24 @@ async def login_image_endpoint(
             detail={"error": "Invalid image", "message": "Failed to decode image. Expected valid JPEG/PNG format."}
         )
 
-    return {
-        "status": "success",
-        "message": f"Login image received successfully for User ID '{clean_user_id}'",
-        "user_id": clean_user_id,
-        "image_size_bytes": len(image_data)
-    }
+    # Offload CPU-bound face detection, FaceNet inference, and FAISS search to threadpool
+    result = await run_in_threadpool(_process_login_sync, clean_user_id, img, len(image_data))
+
+    if result.get("status") == "error":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": result.get("error_type", "Processing error"), "message": result.get("message")}
+        )
+
+    if not result.get("authenticated", False):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "error": "Authentication failed",
+                "authenticated": False,
+                "message": result.get("message", "Biometric verification failed. Face does not match registered user.")
+            }
+        )
+
+    return result
 

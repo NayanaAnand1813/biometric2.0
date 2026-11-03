@@ -22,13 +22,72 @@ print("FaceNet model loaded successfully.")
 
 
 # ==============================================================================
-# Embedding Generation Function
+# Shared FaceNet Embedding Pipeline
+# ==============================================================================
+
+def extract_face_embedding(face_bgr: np.ndarray) -> np.ndarray:
+    """
+    Extracts a 512-dimensional, L2-normalized FaceNet embedding vector from an
+    in-memory cropped face image in BGR format.
+
+    Preserves the exact preprocessing pipeline used across registration and authentication:
+    1. Input validation: ensures face_bgr is a valid non-empty numpy array.
+    2. Resizing to 160x160 pixels (FaceNet's standard input dimensions).
+    3. Color conversion from BGR (OpenCV standard) to RGB (FaceNet expected format).
+    4. Thread-safe FaceNet inference protected by _embedder_lock.
+    5. Verification of 512-dimensional output and finite numerical values.
+    6. Explicit L2 normalization: vector / ||vector||_2 to guarantee exact cosine similarity.
+
+    Parameters:
+        face_bgr (np.ndarray): In-memory cropped face image in BGR format.
+
+    Returns:
+        np.ndarray: 512-dimensional L2-normalized float32 embedding vector.
+
+    Raises:
+        ValueError: If input is not a valid image, output dimensions != 512, contains
+                    non-finite (NaN/Inf) values, or has zero norm.
+    """
+    if face_bgr is None or not isinstance(face_bgr, np.ndarray) or face_bgr.size == 0:
+        raise ValueError("Invalid face image: input must be a non-empty numpy array.")
+
+    # 1. Resize image to 160x160 pixels (FaceNet standard input dimensions)
+    resized_image = cv2.resize(face_bgr, (160, 160))
+
+    # 2. Convert color from BGR (OpenCV default) to RGB (FaceNet expected format)
+    rgb_image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2RGB)
+
+    # 3. Generate face embedding using FaceNet (Thread-safe inference)
+    with _embedder_lock:
+        embeddings = embedder.embeddings([rgb_image])
+    embedding_vector = np.asarray(embeddings[0], dtype=np.float32)
+
+    # 4. Verify 512-dimensional embedding output & validate values
+    dimension = len(embedding_vector)
+    if dimension != 512:
+        raise ValueError(f"Expected 512-dimensional embedding, but got {dimension} dimensions.")
+
+    if not np.all(np.isfinite(embedding_vector)):
+        raise ValueError("Embedding contains invalid non-finite (NaN or Inf) values.")
+
+    # 5. Explicit L2 normalization to guarantee unit norm for exact FAISS cosine search
+    norm = float(np.linalg.norm(embedding_vector))
+    if norm <= 0.0 or not np.isfinite(norm):
+        raise ValueError(f"Invalid embedding norm: {norm}")
+    embedding_vector = embedding_vector / norm
+
+    return embedding_vector
+
+
+# ==============================================================================
+# Embedding Generation Function (Path-Based Interface)
 # ==============================================================================
 
 def generate_embedding(user_id: str, image_path: str, save_json: bool = False) -> dict:
     """
     Generates a 512-dimensional FaceNet embedding for a given cropped face image
-    and associates it with the provided user ID.
+    and associates it with the provided user ID. Delegates to the shared
+    extract_face_embedding function.
 
     Parameters:
         user_id (str): The unique identifier for the user.
@@ -54,31 +113,15 @@ def generate_embedding(user_id: str, image_path: str, save_json: bool = False) -
     if image_bgr is None or image_bgr.size == 0:
         raise ValueError(f"Failed to read image. The file may be corrupted or not a valid image: {image_path}")
 
-    # Step 4: Resize image to 160x160 pixels (FaceNet's standard input dimensions)
-    resized_image = cv2.resize(image_bgr, (160, 160))
-
-    # Step 5: Convert color from BGR (OpenCV default) to RGB (FaceNet expected format)
-    rgb_image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2RGB)
-
-    # Step 6: Generate face embedding using FaceNet (Thread-safe inference)
-    # embedder.embeddings expects a list or batch of RGB images
-    with _embedder_lock:
-        embeddings = embedder.embeddings([rgb_image])
-    embedding_vector = embeddings[0]
-
-    # Step 7: Verify 512-dimensional embedding output & validate values
+    # Step 4: Extract 512-D L2-normalized embedding via shared pipeline
+    embedding_vector = extract_face_embedding(image_bgr)
     dimension = len(embedding_vector)
-    if dimension != 512:
-        raise ValueError(f"Expected 512-dimensional embedding, but got {dimension} dimensions.")
-
-    if not np.all(np.isfinite(embedding_vector)):
-        raise ValueError("Embedding contains invalid non-finite (NaN or Inf) values.")
 
     # Convert numpy array to standard Python list for database compatibility
     embedding_list = [float(x) for x in embedding_vector]
 
     output_filepath = None
-    # Step 8: Optionally save to a JSON file inside backend/embeddings/
+    # Step 5: Optionally save to a JSON file inside backend/embeddings/
     if save_json:
         embedding_data = {
             "user_id": clean_user_id,

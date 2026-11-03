@@ -7,7 +7,7 @@ import httpx
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from main import app
-from user_service import delete_user, get_user_embedding
+from user_service import delete_user, get_user_embedding, register_user_with_embedding
 
 
 async def test_milestone6_login_pipeline():
@@ -19,11 +19,15 @@ async def test_milestone6_login_pipeline():
     with open(test_image_path, "rb") as f:
         valid_jpeg_bytes = f.read()
 
+    # Pre-register registered_user_101 with the test face image so they exist as a registered user
+    delete_user("registered_user_101")
+    register_user_with_embedding("registered_user_101", image_path=test_image_path)
+
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
 
         # -------------------------------------------------------------
-        # Test 1: Successful login image reception (Valid User ID & JPEG)
+        # Test 1: Successful login image reception & verification (Valid User ID & JPEG)
         # -------------------------------------------------------------
         print("\n[Check 1/5] Sending valid User ID and JPEG image to POST /login...")
         files = {"image": ("login_capture.jpg", valid_jpeg_bytes, "image/jpeg")}
@@ -82,13 +86,17 @@ async def test_milestone6_login_pipeline():
         assert resp_corrupt.status_code == 400, f"Expected 400, got {resp_corrupt.status_code}"
         print("  [PASS] Corrupted image bytes correctly rejected with HTTP 400.")
 
+        # Cleanup test user before boundary check
+        delete_user("registered_user_101")
+
         # -------------------------------------------------------------
         # Test 5: Verify Milestone 7 boundaries (No premature auth matching)
         # -------------------------------------------------------------
         print("\n[Check 5/5] Verifying Milestone 7 boundaries...")
         # Verify that /login did NOT create an embedding or write to users table
         db_check = get_user_embedding("registered_user_101")
-        assert db_check is None, "Premature database write occurred during Milestone 6 login!"
+        assert db_check is None, "Premature database write occurred during login!"
+        print("  [PASS] No database write or permanent storage performed during login.")
         print("  [PASS] No database write, embedding extraction, or auth decision performed (Milestone 7 strictly preserved).")
 
     print("\n" + "=" * 65)

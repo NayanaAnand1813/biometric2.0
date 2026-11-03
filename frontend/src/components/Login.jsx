@@ -6,6 +6,7 @@ function Login() {
   const [statusType, setStatusType] = useState("idle"); // idle | loading | success | error
   const [cameraOn, setCameraOn] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [authenticatedUser, setAuthenticatedUser] = useState(null);
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
@@ -134,15 +135,23 @@ function Login() {
 
       const result = await response.json();
 
-      if (response.ok) {
+      if (response.ok && result.authenticated) {
+        setAuthenticatedUser(result.user_id);
         setStatusType("success");
-        setMessage(result.message || "Login image received successfully.");
+        setMessage(result.message || "Biometric authentication successful.");
+        stopCamera();
       } else {
+        setAuthenticatedUser(null);
         setStatusType("error");
-        const errMsg = result.detail?.message || result.detail || result.error || "Failed to process login image.";
+        const errMsg =
+          result.detail?.message ||
+          result.detail?.error ||
+          result.message ||
+          "Access Denied: Biometric verification failed.";
         setMessage(errMsg);
       }
     } catch (netErr) {
+      setAuthenticatedUser(null);
       setStatusType("error");
       setMessage("Failed to connect to backend server. Please verify FastAPI backend is running.");
     } finally {
@@ -156,6 +165,82 @@ function Login() {
     if (statusType === "loading") return "#2563eb";
     return "#333";
   };
+
+  // Render Access Granted / Welcome screen if authenticated
+  if (authenticatedUser) {
+    return (
+      <div style={{ textAlign: "center", padding: "30px 20px" }}>
+        <div
+          style={{
+            maxWidth: "500px",
+            margin: "0 auto",
+            padding: "24px",
+            borderRadius: "12px",
+            background: "#f0fdf4",
+            border: "2px solid #16a34a",
+            boxShadow: "0 4px 14px rgba(22, 163, 74, 0.15)"
+          }}
+        >
+          <div style={{ fontSize: "52px", marginBottom: "12px" }}>🎉</div>
+          <h2 style={{ color: "#15803d", margin: "0 0 10px 0" }}>Access Granted!</h2>
+          <p style={{ fontSize: "18px", color: "#166534", margin: "0 0 20px 0" }}>
+            Welcome, <strong>{authenticatedUser}</strong>
+          </p>
+
+          <div
+            style={{
+              background: "#ffffff",
+              padding: "16px",
+              borderRadius: "8px",
+              border: "1px solid #bbf7d0",
+              textAlign: "left",
+              marginBottom: "20px",
+              fontSize: "14px",
+              color: "#374151"
+            }}
+          >
+            <div style={{ marginBottom: "8px" }}>
+              <span style={{ fontWeight: "600", color: "#15803d" }}>Status: </span>
+              <span style={{ color: "#16a34a", fontWeight: "bold" }}>● Biometrically Verified</span>
+            </div>
+            <div style={{ marginBottom: "8px" }}>
+              <span style={{ fontWeight: "600", color: "#15803d" }}>Authenticated User ID: </span>
+              <code style={{ background: "#f3f4f6", padding: "3px 8px", borderRadius: "4px", fontWeight: "600" }}>
+                {authenticatedUser}
+              </code>
+            </div>
+            <div>
+              <span style={{ fontWeight: "600", color: "#15803d" }}>Pipeline: </span>
+              <span>BlazeFace Detection → FaceNet 512-D → FAISS Exact Match</span>
+            </div>
+          </div>
+
+          <button
+            onClick={() => {
+              setAuthenticatedUser(null);
+              setUserId("");
+              setStatusType("idle");
+              setMessage("");
+            }}
+            style={{
+              padding: "10px 24px",
+              fontSize: "15px",
+              fontWeight: "600",
+              cursor: "pointer",
+              borderRadius: "6px",
+              backgroundColor: "#15803d",
+              color: "#fff",
+              border: "none",
+              boxShadow: "0 2px 6px rgba(0,0,0,0.1)",
+              transition: "background-color 0.2s"
+            }}
+          >
+            Logout / Authenticate Another User
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ textAlign: "center", padding: "20px" }}>

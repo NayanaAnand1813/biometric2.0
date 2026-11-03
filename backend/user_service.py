@@ -9,7 +9,8 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from database import get_pooled_connection
-from generate_embedding import generate_embedding
+from generate_embedding import generate_embedding, extract_face_embedding
+import numpy as np
 
 
 class UserAlreadyExistsError(Exception):
@@ -22,21 +23,29 @@ class InvalidUserError(Exception):
     pass
 
 
-def register_user_with_embedding(user_id: str, image_path: str, save_json: bool = False) -> dict:
+def register_user_with_embedding(
+    user_id: str,
+    image_path: str = None,
+    face_bgr: np.ndarray = None,
+    save_json: bool = False
+) -> dict:
     """
     Registers a new user in the PostgreSQL database with their 512-dimensional FaceNet embedding.
 
     Workflow:
     1. Validates user ID.
-    2. Generates the 512-dimensional FaceNet embedding from the cropped face image.
+    2. Generates the 512-dimensional FaceNet embedding from either the in-memory cropped
+       face image (face_bgr) or file system path (image_path).
     3. Validates embedding length and values.
     4. Connects to PostgreSQL via the connection pool and inserts the user record
        using parameterized queries.
     5. Confirms successful transaction commit.
+    6. Synchronizes embedding to FAISS index ONLY post-commit.
 
     Parameters:
         user_id (str): Unique user identifier.
-        image_path (str): File system path to cropped face image.
+        image_path (str, optional): File system path to cropped face image.
+        face_bgr (np.ndarray, optional): In-memory cropped face image in BGR format.
         save_json (bool): Whether to create a permanent JSON backup file (default False).
 
     Returns:
@@ -52,20 +61,28 @@ def register_user_with_embedding(user_id: str, image_path: str, save_json: bool 
         raise InvalidUserError("User ID must be a non-empty string.")
     clean_user_id = str(user_id).strip()
 
-    # Step 1: Generate FaceNet embedding
-    try:
-        embedding_result = generate_embedding(
-            user_id=clean_user_id,
-            image_path=image_path,
-            save_json=save_json
-        )
-    except FileNotFoundError as fnf_err:
-        raise InvalidUserError(f"Cropped face image not found: {fnf_err}") from fnf_err
-    except ValueError as val_err:
-        raise InvalidUserError(f"Failed to generate embedding: {val_err}") from val_err
+    # Step 1: Generate FaceNet embedding via in-memory image or file path
+    if face_bgr is not None:
+        try:
+            embedding_arr = extract_face_embedding(face_bgr)
+            embedding_vector = [float(x) for x in embedding_arr]
+            embedding_dim = len(embedding_vector)
+        except Exception as emb_err:
+            raise InvalidUserError(f"Failed to generate embedding: {emb_err}") from emb_err
+    else:
+        try:
+            embedding_result = generate_embedding(
+                user_id=clean_user_id,
+                image_path=image_path,
+                save_json=save_json
+            )
+        except FileNotFoundError as fnf_err:
+            raise InvalidUserError(f"Cropped face image not found: {fnf_err}") from fnf_err
+        except ValueError as val_err:
+            raise InvalidUserError(f"Failed to generate embedding: {val_err}") from val_err
 
-    embedding_vector = embedding_result["embedding"]
-    embedding_dim = embedding_result["embedding_dimension"]
+        embedding_vector = embedding_result["embedding"]
+        embedding_dim = embedding_result["embedding_dimension"]
 
     # Step 2: Validate embedding dimension before database insertion
     if embedding_dim != 512 or len(embedding_vector) != 512:
@@ -92,6 +109,18 @@ def register_user_with_embedding(user_id: str, image_path: str, save_json: bool 
             confirmed_dim = row[2]
 
             print(f"[DB SUCCESS] Registered user '{confirmed_uid}' with {confirmed_dim}-D embedding.")
+
+            # Step 4: Safe FAISS synchronization - Add to FAISS ONLY after successful DB commit
+            try:
+                from faiss_service import get_faiss_manager
+                faiss_mgr = get_faiss_manager()
+                faiss_mgr.add_user(confirmed_uid, embedding_vector)
+            except Exception as faiss_err:
+                print(f"[FAISS SYNC WARNING] Post-commit FAISS sync for '{confirmed_uid}': {faiss_err}. Initiating index reconciliation...")
+                try:
+                    faiss_mgr.initialize_from_database()
+                except Exception as recon_err:
+                    print(f"[FAISS RECONCILIATION ERROR] Index reconciliation failed: {recon_err}")
 
             return {
                 "status": "success",
@@ -154,16 +183,27 @@ def get_user_embedding(user_id: str) -> dict | None:
 
 def delete_user(user_id: str) -> bool:
     """
-    Safely removes a test user from PostgreSQL by user ID.
+    Safely removes a test user from PostgreSQL by user ID and synchronizes with FAISS.
     Used for test cleanup and idempotency.
     """
     if not user_id:
         return False
+    clean_uid = str(user_id).strip()
     with get_pooled_connection() as conn:
         try:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM users WHERE user_id = %s;", (str(user_id).strip(),))
+                cur.execute("DELETE FROM users WHERE user_id = %s;", (clean_uid,))
             conn.commit()
+
+            # Keep FAISS in sync on delete
+            try:
+                from faiss_service import get_faiss_manager
+                faiss_mgr = get_faiss_manager()
+                if faiss_mgr.is_initialized():
+                    faiss_mgr.remove_user(clean_uid)
+            except Exception as faiss_err:
+                print(f"[FAISS REMOVE WARNING] Post-delete FAISS sync for '{clean_uid}': {faiss_err}")
+
             return True
         except Exception:
             conn.rollback()

@@ -1,6 +1,8 @@
 
 # Python
 venv/
+backend/venv/
+backend/facenet_env/
 __pycache__/
 *.pyc
 
