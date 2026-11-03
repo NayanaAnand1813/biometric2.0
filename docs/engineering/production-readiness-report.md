@@ -1,22 +1,22 @@
-# Production Readiness Report (Milestone 5: Face Embedding Storage and Concurrent User Registration)
+# Production Readiness Report (Milestone 6: Login Frontend – Image Capture)
 
 ## Summary
-- **Target**: Milestone 5 - Face Embedding Storage and Concurrent User Registration
+- **Target**: Milestone 6 - Login Frontend – Image Capture
 - **Result**: GO (Milestone complete and verified end-to-end locally)
 
 ## Verification Checks
-- **Task 1: Database Schema & Dimension Constraints**: PASS (`backend/test_task1_schema.py`)
-- **Task 2: FaceNet Singleton & 512-D Validation**: PASS (`backend/test_task2_facenet.py`)
-- **Task 3: Database Storage & Parameterized Queries**: PASS (`backend/test_task3_storage.py`)
-- **Task 4: Multi-User Concurrency & Connection Pooling**: PASS (`backend/test_task4_concurrency.py`, `backend/test_api_concurrency.py`)
-- **Task 5: End-to-End Milestone 5 Verification Suite**: PASS (`backend/test_milestone5_complete.py` - 8/8 checks passed)
+- **Login Frontend Interface**: PASS (`frontend/src/components/Login.jsx`)
+- **Webcam getUserMedia & Canvas Capture**: PASS (JPEG frame generation & track cleanup)
+- **Error Handling**: PASS (Permission denial, device missing, camera busy, empty user ID)
+- **Vite Production Build**: PASS (`npm run build` executed in 271ms with 0 errors)
+- **Backend POST /login Endpoint**: PASS (`backend/test_milestone6_login.py` 5/5 checks passed)
 - **Regression Checks**:
-  - MediaPipe BlazeFace detection: PASS
-  - FaceNet 512-D inference: PASS
+  - Registration pipeline intact: PASS (`backend/test_milestone5_complete.py` 8/8 checks passed)
   - Milestone 4 database connection test: PASS (`backend/test_db_connection.py`)
-  - React frontend untouched: PASS
+  - No database schema or FaceNet modifications: PASS
+  - React frontend build: PASS
 
 ## Release Readiness
-- Status: **GO** for Milestone 5 completion.
-- Vector matching / FAISS similarity search and user login pipeline remain intentionally deferred to subsequent milestones.
+- Status: **GO** for Milestone 6 completion.
+- Face detection, FaceNet embedding extraction on login, FAISS similarity search, and authentication decision logic remain strictly deferred to Milestone 7.
 

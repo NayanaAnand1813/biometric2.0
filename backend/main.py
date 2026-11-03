@@ -176,3 +176,49 @@ async def get_user_endpoint(user_id: str):
             detail={"error": "Not Found", "message": f"User '{user_id}' not found."}
         )
     return user_data
+
+
+@app.post("/login")
+async def login_image_endpoint(
+    user_id: str = Form(...),
+    image: UploadFile = File(...)
+):
+    """
+    Milestone 6 Login Capture endpoint:
+    Receives User ID and face image from the frontend login interface.
+    Validates user_id and image integrity. Confirms receipt to frontend.
+    Note: Face detection, embedding generation, FAISS similarity matching,
+    and authentication decisions are strictly deferred to Milestone 7.
+    """
+    clean_user_id = user_id.strip() if user_id else ""
+    if not clean_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Invalid user_id", "message": "User ID cannot be empty."}
+        )
+
+    # Read uploaded image bytes
+    image_data = await image.read()
+    if not image_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Empty file", "message": "Uploaded image file is empty."}
+        )
+
+    # Decode and validate image using OpenCV
+    np_array = np.frombuffer(image_data, np.uint8)
+    img = cv2.imdecode(np_array, cv2.IMREAD_COLOR)
+
+    if img is None or img.size == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Invalid image", "message": "Failed to decode image. Expected valid JPEG/PNG format."}
+        )
+
+    return {
+        "status": "success",
+        "message": f"Login image received successfully for User ID '{clean_user_id}'",
+        "user_id": clean_user_id,
+        "image_size_bytes": len(image_data)
+    }
+

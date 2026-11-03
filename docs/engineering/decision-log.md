@@ -26,3 +26,7 @@
    - **Decision**: `psycopg2.pool.ThreadedConnectionPool` (1-20 connections), `threading.Lock` guards around MediaPipe and FaceNet inference, and `run_in_threadpool` for non-blocking FastAPI async execution.
    - **Rationale**: Eliminates race conditions in underlying C++ / TensorFlow runtimes while keeping the FastAPI async event loop fully responsive. Ensures atomic transactions with automatic rollback on error. Duplicate user IDs are caught at the database unique index layer and surfaced as HTTP 409 Conflict without silent overwrites.
 
+7. **Milestone 6: Login Frontend Capture Interface & Boundary Isolation**
+   - **Decision**: Implemented modular `Login.jsx` and preserved existing `Registration.jsx` with tabbed navigation in `App.jsx`. Added `POST /login` on FastAPI to validate User ID and JPEG image receipt.
+   - **Rationale**: Cleanly decouples registration and login workflows without introducing new npm dependencies (e.g., react-router). Strictly separates camera capture in Milestone 6 from biometric verification, similarity search, and authentication decision-making (deferred to Milestone 7).
+
