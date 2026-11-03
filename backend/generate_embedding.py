@@ -1,5 +1,6 @@
 import os
 import json
+import threading
 import cv2
 import numpy as np
 from keras_facenet import FaceNet
@@ -16,6 +17,7 @@ os.makedirs(EMBEDDINGS_DIR, exist_ok=True)
 # Load the FaceNet model only ONCE globally to avoid re-loading weights on every call
 print("Loading FaceNet model (this will load only once)...")
 embedder = FaceNet()
+_embedder_lock = threading.Lock()
 print("FaceNet model loaded successfully.")
 
 
@@ -23,65 +25,76 @@ print("FaceNet model loaded successfully.")
 # Embedding Generation Function
 # ==============================================================================
 
-def generate_embedding(user_id: str, image_path: str) -> dict:
+def generate_embedding(user_id: str, image_path: str, save_json: bool = False) -> dict:
     """
     Generates a 512-dimensional FaceNet embedding for a given cropped face image
-    and saves the user ID and embedding into a JSON file.
+    and associates it with the provided user ID.
 
     Parameters:
         user_id (str): The unique identifier for the user.
         image_path (str): File system path to the cropped face image.
+        save_json (bool): If True, saves a JSON copy of the embedding to backend/embeddings/.
+                          Defaults to False to prevent disk clutter and redundant I/O.
 
     Returns:
-        dict: A dictionary containing the user_id, embedding length, and output JSON path.
+        dict: A dictionary containing the user_id, embedding dimension, embedding list,
+              and optional output JSON file path if save_json is True.
     """
-    # Step 1: Validate file path existence
+    # Step 1: Validate user ID
+    if not user_id or not str(user_id).strip():
+        raise ValueError("Invalid user_id: User ID cannot be empty.")
+    clean_user_id = str(user_id).strip()
+
+    # Step 2: Validate file path existence
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"Image file does not exist at: {image_path}")
 
-    # Step 2: Read the cropped image using OpenCV
+    # Step 3: Read the cropped image using OpenCV
     image_bgr = cv2.imread(image_path)
     if image_bgr is None or image_bgr.size == 0:
         raise ValueError(f"Failed to read image. The file may be corrupted or not a valid image: {image_path}")
 
-    # Step 3: Resize image to 160x160 pixels (FaceNet's standard input dimensions)
+    # Step 4: Resize image to 160x160 pixels (FaceNet's standard input dimensions)
     resized_image = cv2.resize(image_bgr, (160, 160))
 
-    # Step 4: Convert color from BGR (OpenCV default) to RGB (FaceNet expected format)
+    # Step 5: Convert color from BGR (OpenCV default) to RGB (FaceNet expected format)
     rgb_image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2RGB)
 
-    # Step 5: Generate face embedding using FaceNet
+    # Step 6: Generate face embedding using FaceNet (Thread-safe inference)
     # embedder.embeddings expects a list or batch of RGB images
-    embeddings = embedder.embeddings([rgb_image])
+    with _embedder_lock:
+        embeddings = embedder.embeddings([rgb_image])
     embedding_vector = embeddings[0]
 
-    # Step 6: Verify 512-dimensional embedding output
+    # Step 7: Verify 512-dimensional embedding output & validate values
     dimension = len(embedding_vector)
     if dimension != 512:
         raise ValueError(f"Expected 512-dimensional embedding, but got {dimension} dimensions.")
 
-    # Convert numpy array to standard Python list for JSON serialization
-    embedding_list = embedding_vector.tolist()
+    if not np.all(np.isfinite(embedding_vector)):
+        raise ValueError("Embedding contains invalid non-finite (NaN or Inf) values.")
 
-    # Step 7: Prepare data associating user_id with the embedding
-    embedding_data = {
-        "user_id": str(user_id),
-        "embedding_dimension": dimension,
-        "embedding": embedding_list
-    }
+    # Convert numpy array to standard Python list for database compatibility
+    embedding_list = [float(x) for x in embedding_vector]
 
-    # Step 8: Save to a JSON file inside backend/embeddings/
-    output_filename = f"{user_id}.json"
-    output_filepath = os.path.join(EMBEDDINGS_DIR, output_filename)
+    output_filepath = None
+    # Step 8: Optionally save to a JSON file inside backend/embeddings/
+    if save_json:
+        embedding_data = {
+            "user_id": clean_user_id,
+            "embedding_dimension": dimension,
+            "embedding": embedding_list
+        }
+        output_filename = f"{clean_user_id}.json"
+        output_filepath = os.path.join(EMBEDDINGS_DIR, output_filename)
+        with open(output_filepath, "w", encoding="utf-8") as f:
+            json.dump(embedding_data, f, indent=4)
+        print(f"[SAVED] Stored embedding copy in: {output_filepath}")
 
-    with open(output_filepath, "w", encoding="utf-8") as f:
-        json.dump(embedding_data, f, indent=4)
-
-    print(f"[SUCCESS] Generated 512-D embedding for User ID: {user_id}")
-    print(f"[SAVED] Stored embedding in: {output_filepath}")
+    print(f"[SUCCESS] Generated 512-D embedding for User ID: {clean_user_id}")
 
     return {
-        "user_id": str(user_id),
+        "user_id": clean_user_id,
         "embedding_dimension": dimension,
         "embedding_file": output_filepath,
         "embedding": embedding_list

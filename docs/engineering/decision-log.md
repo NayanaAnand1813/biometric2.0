@@ -18,3 +18,11 @@
    - **Decision**: Only `user_id` and `created_at` in the `users` table.
    - **Rationale**: Strictly preserves separation of concerns and obeys prompt constraints against premature vector storage integration.
 
+5. **Milestone 5 Task 1: Vector Storage Format (`REAL[]`)**
+   - **Decision**: PostgreSQL native 1-D array of single-precision floating point numbers (`REAL[]`) with `CHECK (embedding IS NULL OR (array_ndims(embedding) = 1 AND array_length(embedding, 1) = 512))`.
+   - **Rationale**: Avoids Windows compilation dependencies of `pgvector` on PostgreSQL 17; maps natively to Python float lists with `psycopg2`; guarantees strict 512-dimension vector integrity at the DB constraint layer; non-destructive schema migration.
+
+6. **Milestone 5 Task 4: Concurrency Model & Connection Pooling**
+   - **Decision**: `psycopg2.pool.ThreadedConnectionPool` (1-20 connections), `threading.Lock` guards around MediaPipe and FaceNet inference, and `run_in_threadpool` for non-blocking FastAPI async execution.
+   - **Rationale**: Eliminates race conditions in underlying C++ / TensorFlow runtimes while keeping the FastAPI async event loop fully responsive. Ensures atomic transactions with automatic rollback on error. Duplicate user IDs are caught at the database unique index layer and surfaced as HTTP 409 Conflict without silent overwrites.
+

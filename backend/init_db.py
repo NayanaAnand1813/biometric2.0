@@ -10,8 +10,21 @@ from database import get_db_connection
 CREATE_USERS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS users (
     user_id VARCHAR(255) PRIMARY KEY,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    embedding REAL[]
 );
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS embedding REAL[];
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'check_embedding_dim'
+    ) THEN
+        ALTER TABLE users ADD CONSTRAINT check_embedding_dim 
+        CHECK (embedding IS NULL OR (array_ndims(embedding) = 1 AND array_length(embedding, 1) = 512));
+    END IF;
+END $$;
 """
 
 

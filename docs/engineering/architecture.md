@@ -12,8 +12,9 @@
 ### Table: `users`
 - `user_id`: `VARCHAR(255)` (`PRIMARY KEY`) - Unique user identifier.
 - `created_at`: `TIMESTAMP` (`DEFAULT CURRENT_TIMESTAMP`) - User registration timestamp.
+- `embedding`: `REAL[]` (`CHECK (embedding IS NULL OR (array_ndims(embedding) = 1 AND array_length(embedding, 1) = 512))`) - 512-dimensional FaceNet biometric float vector.
 
-*(Note: Biometric vector storage is explicitly deferred to later milestones; no vector embeddings or pgvector extensions are added in this milestone).*
+*(Note: Biometric vector storage is implemented natively using PostgreSQL `REAL[]` with dimension constraints; external vector extensions such as pgvector are avoided for stability and environment compatibility).*
 
 ## Trust Boundaries & Security
 - Database credentials loaded strictly via `python-dotenv` from local `backend/.env`.

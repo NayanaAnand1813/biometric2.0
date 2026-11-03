@@ -9,4 +9,9 @@
 | FastAPI Python environment connects | PASSED | `backend/test_db_connection.py` executed via `backend/venv/Scripts/python.exe` |
 | Sample user insertion and retrieval works | PASSED | `INSERT` and `SELECT` verified in `backend/test_db_connection.py` |
 | Existing milestones unchanged | PASSED | React frontend, BlazeFace detector, FaceNet embeddings scripts, and test JSON files remain intact |
+| Milestone 5 Task 1: Embedding Column & Constraint | PASSED | Added `embedding REAL[]` with `check_embedding_dim` enforcing 512 dimensions; verified with `backend/test_task1_schema.py` |
+| Milestone 5 Task 2: FaceNet Integration & Validation | PASSED | Reused FaceNet singleton, verified thread-safety lock, validated 512 dimensions and finite floats, user-embedding isolation; verified with `backend/test_task2_facenet.py` |
+| Milestone 5 Task 3: Database Storage Function | PASSED | Implemented `register_user_with_embedding` using parameterized queries and thread-safe connection pooling, verified 512-D retrieval and clean disk footprint; verified with `backend/test_task3_storage.py` |
+| Milestone 5 Task 4: Concurrency & Duplicate Protection | PASSED | Verified concurrent user registrations (5 threads), isolated data integrity, race-condition duplicate protection (409 Conflict), and async HTTP concurrency; verified with `backend/test_task4_concurrency.py` and `backend/test_api_concurrency.py` |
+| Milestone 5 Task 5: End-to-End Acceptance Suite | PASSED | All 8 required test steps passed: single user register & store, 512-D retrieval, second user register & data immutability, duplicate ID rejection, invalid image handling, 5-thread concurrency isolation, BlazeFace regression, and database cleanup; verified with `backend/test_milestone5_complete.py` |
 
