@@ -25,7 +25,9 @@ async def run_milestone7_auth_suite():
     print("      MILESTONE 7 (WAVE 2): BIOMETRIC LOGIN ACCEPTANCE SUITE      ")
     print("=" * 70)
 
-    test_image_path = os.path.join(BASE_DIR, "cropped_faces", "1234_face.jpg")
+    test_image_path = os.path.join(BASE_DIR, "cropped_faces", "1804_face.jpg")
+    if not os.path.exists(test_image_path):
+        test_image_path = os.path.join(BASE_DIR, "cropped_faces", "1234_face.jpg")
     with open(test_image_path, "rb") as f:
         valid_jpeg_bytes = f.read()
 

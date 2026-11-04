@@ -26,7 +26,9 @@ async def test_delete_user_suite():
     print("        DELETE USER FUNCTIONALITY & SYNCHRONIZATION TEST SUITE       ")
     print("=" * 70)
 
-    test_image_path = os.path.join(BASE_DIR, "cropped_faces", "1234_face.jpg")
+    test_image_path = os.path.join(BASE_DIR, "cropped_faces", "1804_face.jpg")
+    if not os.path.exists(test_image_path):
+        test_image_path = os.path.join(BASE_DIR, "cropped_faces", "1234_face.jpg")
     assert os.path.exists(test_image_path), "Test face image fixture missing."
 
     timestamp = int(time.time())

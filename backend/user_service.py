@@ -51,7 +51,7 @@ def register_user_with_embedding(
         user_id (str): Unique user identifier.
         image_path (str, optional): File system path to cropped face image.
         face_bgr (np.ndarray, optional): In-memory cropped face image in BGR format.
-        save_json (bool): Whether to create a permanent JSON backup file (default False).
+        save_json (bool): Deprecated legacy flag (retained for backward compatibility).
 
     Returns:
         dict: Registration confirmation containing user_id, created_at, and embedding dimension.
@@ -223,8 +223,7 @@ def delete_user_completely(user_id: str) -> dict:
     3. Deletes user row and 512-D FaceNet embedding from PostgreSQL in an ACID transaction.
     4. Removes corresponding vector entry from the in-memory FAISS index (or triggers safe DB rebuild).
     5. Deletes all associated cropped face images from backend/cropped_faces/.
-    6. Deletes any associated JSON embedding backups from backend/embeddings/.
-    7. Guarantees strict PostgreSQL and FAISS index synchronization.
+    6. Guarantees strict PostgreSQL and FAISS index synchronization.
 
     Parameters:
         user_id (str): Unique user identifier.
@@ -293,18 +292,6 @@ def delete_user_completely(user_id: str) -> dict:
                 except Exception as f_err:
                     print(f"[STORAGE WARNING] Failed to delete file '{fpath}': {f_err}")
 
-    # Step 4: Delete associated JSON embedding backups if present
-    deleted_json = []
-    emb_dir = os.path.join(BASE_DIR, "embeddings")
-    json_path = os.path.join(emb_dir, f"{clean_user_id}.json")
-    if os.path.isfile(json_path):
-        try:
-            os.remove(json_path)
-            deleted_json.append(f"{clean_user_id}.json")
-            print(f"[STORAGE] Deleted embedding JSON backup: {clean_user_id}.json")
-        except Exception as j_err:
-            print(f"[STORAGE WARNING] Failed to delete JSON '{json_path}': {j_err}")
-
     return {
         "status": "success",
         "message": f"User '{clean_user_id}' and all associated biometric embeddings and face images deleted successfully.",
@@ -313,7 +300,7 @@ def delete_user_completely(user_id: str) -> dict:
             "database_record": True,
             "faiss_index": faiss_removed,
             "cropped_images": deleted_images,
-            "embedding_files": deleted_json
+            "embedding_files": []
         }
     }
 

@@ -1,5 +1,4 @@
 import os
-import json
 import threading
 import cv2
 import numpy as np
@@ -9,10 +8,7 @@ from keras_facenet import FaceNet
 # Configuration & Model Initialization
 # ==============================================================================
 
-# Directory where embeddings will be saved (backend/embeddings/)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-EMBEDDINGS_DIR = os.path.join(BASE_DIR, "embeddings")
-os.makedirs(EMBEDDINGS_DIR, exist_ok=True)
 
 # Load the FaceNet model only ONCE globally to avoid re-loading weights on every call
 print("Loading FaceNet model (this will load only once)...")
@@ -92,12 +88,12 @@ def generate_embedding(user_id: str, image_path: str, save_json: bool = False) -
     Parameters:
         user_id (str): The unique identifier for the user.
         image_path (str): File system path to the cropped face image.
-        save_json (bool): If True, saves a JSON copy of the embedding to backend/embeddings/.
-                          Defaults to False to prevent disk clutter and redundant I/O.
+        save_json (bool): Deprecated legacy flag (retained for backward compatibility;
+                          embeddings are now exclusively stored in PostgreSQL).
 
     Returns:
         dict: A dictionary containing the user_id, embedding dimension, embedding list,
-              and optional output JSON file path if save_json is True.
+              and embedding_file (None, as embeddings are persisted in PostgreSQL).
     """
     # Step 1: Validate user ID
     if not user_id or not str(user_id).strip():
@@ -120,26 +116,12 @@ def generate_embedding(user_id: str, image_path: str, save_json: bool = False) -
     # Convert numpy array to standard Python list for database compatibility
     embedding_list = [float(x) for x in embedding_vector]
 
-    output_filepath = None
-    # Step 5: Optionally save to a JSON file inside backend/embeddings/
-    if save_json:
-        embedding_data = {
-            "user_id": clean_user_id,
-            "embedding_dimension": dimension,
-            "embedding": embedding_list
-        }
-        output_filename = f"{clean_user_id}.json"
-        output_filepath = os.path.join(EMBEDDINGS_DIR, output_filename)
-        with open(output_filepath, "w", encoding="utf-8") as f:
-            json.dump(embedding_data, f, indent=4)
-        print(f"[SAVED] Stored embedding copy in: {output_filepath}")
-
     print(f"[SUCCESS] Generated 512-D embedding for User ID: {clean_user_id}")
 
     return {
         "user_id": clean_user_id,
         "embedding_dimension": dimension,
-        "embedding_file": output_filepath,
+        "embedding_file": None,
         "embedding": embedding_list
     }
 
@@ -153,16 +135,18 @@ if __name__ == "__main__":
     print("Testing FaceNet embedding generation...")
     print("-" * 60)
 
-    # Test with existing test image: backend/cropped_faces/1234_face.jpg and user ID 1234
-    test_user_id = "1234"
-    test_image_path = os.path.join(BASE_DIR, "cropped_faces", "1234_face.jpg")
+    # Test with existing test image: backend/cropped_faces/1804_face.jpg or 1234_face.jpg
+    test_user_id = "1804"
+    test_image_path = os.path.join(BASE_DIR, "cropped_faces", "1804_face.jpg")
+    if not os.path.exists(test_image_path):
+        test_image_path = os.path.join(BASE_DIR, "cropped_faces", "1234_face.jpg")
 
     try:
         result = generate_embedding(user_id=test_user_id, image_path=test_image_path)
         print(f"\nUser ID: {result['user_id']}")
         print(f"Embedding Vector Dimensions: {result['embedding_dimension']}")
         print(f"Sample Embedding Values (first 5 elements): {result['embedding'][:5]}")
-        print(f"Saved JSON File: {result['embedding_file']}")
+        print(f"Embedding File: {result['embedding_file']}")
     except Exception as e:
         print(f"[ERROR] Failed to generate embedding: {e}")
 

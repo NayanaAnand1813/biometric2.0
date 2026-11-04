@@ -24,7 +24,9 @@ def test_milestone5_all():
     print("       MILESTONE 5: END-TO-END VERIFICATION & ACCEPTANCE SUITE       ")
     print("=" * 70)
 
-    test_image_path = os.path.join(os.path.dirname(__file__), "cropped_faces", "1234_face.jpg")
+    test_image_path = os.path.join(os.path.dirname(__file__), "cropped_faces", "1804_face.jpg")
+    if not os.path.exists(test_image_path):
+        test_image_path = os.path.join(os.path.dirname(__file__), "cropped_faces", "1234_face.jpg")
     assert os.path.exists(test_image_path), f"Base test image missing at {test_image_path}"
 
     test_users_to_clean = []

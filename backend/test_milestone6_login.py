@@ -15,7 +15,9 @@ async def test_milestone6_login_pipeline():
     print("       MILESTONE 6: LOGIN IMAGE CAPTURE API VERIFICATION        ")
     print("=" * 65)
 
-    test_image_path = os.path.join(os.path.dirname(__file__), "cropped_faces", "1234_face.jpg")
+    test_image_path = os.path.join(os.path.dirname(__file__), "cropped_faces", "1804_face.jpg")
+    if not os.path.exists(test_image_path):
+        test_image_path = os.path.join(os.path.dirname(__file__), "cropped_faces", "1234_face.jpg")
     with open(test_image_path, "rb") as f:
         valid_jpeg_bytes = f.read()
 

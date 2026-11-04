@@ -1,12 +1,13 @@
 import { useState } from "react";
 import Registration from "./components/Registration";
 import Login from "./components/Login";
+import UserManagement from "./components/UserManagement";
 
 function App() {
-  const [activeTab, setActiveTab] = useState("login"); // default to login or registration
+  const [activeTab, setActiveTab] = useState("login"); // default to login, registration, or users
 
   return (
-    <div style={{ maxWidth: "700px", margin: "30px auto", fontFamily: "system-ui, sans-serif" }}>
+    <div style={{ maxWidth: "780px", margin: "30px auto", fontFamily: "system-ui, sans-serif" }}>
       <header style={{ textAlign: "center", marginBottom: "25px" }}>
         <h1 style={{ marginBottom: "8px", color: "#111827" }}>Biometric Face Recognition</h1>
         <p style={{ color: "#6b7280", margin: 0 }}>
@@ -63,6 +64,25 @@ function App() {
         >
           Face Login
         </button>
+
+        <button
+          onClick={() => setActiveTab("users")}
+          style={{
+            flex: 1,
+            padding: "10px 18px",
+            fontSize: "15px",
+            fontWeight: "600",
+            cursor: "pointer",
+            border: "none",
+            borderRadius: "6px",
+            background: activeTab === "users" ? "#fff" : "transparent",
+            color: activeTab === "users" ? "#1f2937" : "#6b7280",
+            boxShadow: activeTab === "users" ? "0 2px 4px rgba(0,0,0,0.08)" : "none",
+            transition: "all 0.2s ease"
+          }}
+        >
+          Manage Users
+        </button>
       </div>
 
       {/* Tab Content */}
@@ -75,10 +95,13 @@ function App() {
           border: "1px solid #e5e7eb"
         }}
       >
-        {activeTab === "register" ? <Registration /> : <Login />}
+        {activeTab === "register" && <Registration />}
+        {activeTab === "login" && <Login />}
+        {activeTab === "users" && <UserManagement />}
       </main>
     </div>
   );
 }
 
 export default App;
+

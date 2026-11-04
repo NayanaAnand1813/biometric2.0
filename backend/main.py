@@ -113,8 +113,7 @@ def _process_registration_sync(clean_user_id: str, img: np.ndarray) -> dict:
     # 5. Generate FaceNet 512-D embedding and store in PostgreSQL
     reg_result = register_user_with_embedding(
         user_id=clean_user_id,
-        image_path=output_path,
-        save_json=False
+        image_path=output_path
     )
 
     return {
@@ -252,7 +251,6 @@ async def delete_user_endpoint(
     - Purges the user record and 512-D FaceNet embedding from PostgreSQL.
     - Removes their corresponding vector from the in-memory FAISS IndexFlatIP.
     - Deletes their cropped face images from disk.
-    - Deletes any JSON embedding backup files.
     - Safely handles missing users (404) and database failures (500).
     - Preserves all other registered users and maintains PostgreSQL-FAISS synchronization.
     """

@@ -25,7 +25,9 @@ def test_shared_face_embedding_pipeline():
     print(" [Check 1/6] Testing Shared FaceNet Preprocessing & Normalization")
     print("=" * 65)
 
-    test_image_path = os.path.join(BASE_DIR, "cropped_faces", "1234_face.jpg")
+    test_image_path = os.path.join(BASE_DIR, "cropped_faces", "1804_face.jpg")
+    if not os.path.exists(test_image_path):
+        test_image_path = os.path.join(BASE_DIR, "cropped_faces", "1234_face.jpg")
     img_bgr = cv2.imread(test_image_path)
     assert img_bgr is not None and img_bgr.size > 0, "Test face image could not be loaded."
 
@@ -147,7 +149,9 @@ def test_faiss_initialization_from_postgres():
 
     # Register temporary test user in DB
     test_uid = f"faiss_db_init_test_{int(time.time())}"
-    test_img = os.path.join(BASE_DIR, "cropped_faces", "1234_face.jpg")
+    test_img = os.path.join(BASE_DIR, "cropped_faces", "1804_face.jpg")
+    if not os.path.exists(test_img):
+        test_img = os.path.join(BASE_DIR, "cropped_faces", "1234_face.jpg")
 
     try:
         reg_res = register_user_with_embedding(test_uid, image_path=test_img)
@@ -184,7 +188,9 @@ def test_faiss_safe_synchronization_and_rollback():
     initial_count = faiss_mgr.get_user_count()
 
     conflict_uid = f"faiss_conflict_user_{int(time.time())}"
-    test_img = os.path.join(BASE_DIR, "cropped_faces", "1234_face.jpg")
+    test_img = os.path.join(BASE_DIR, "cropped_faces", "1804_face.jpg")
+    if not os.path.exists(test_img):
+        test_img = os.path.join(BASE_DIR, "cropped_faces", "1234_face.jpg")
 
     # Step 1: Successful registration adds to DB and FAISS
     reg1 = register_user_with_embedding(conflict_uid, image_path=test_img)
