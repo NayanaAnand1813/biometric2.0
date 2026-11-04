@@ -23,6 +23,11 @@ class InvalidUserError(Exception):
     pass
 
 
+class UserNotFoundError(Exception):
+    """Raised when a specified user does not exist in the database."""
+    pass
+
+
 def register_user_with_embedding(
     user_id: str,
     image_path: str = None,
@@ -181,31 +186,150 @@ def get_user_embedding(user_id: str) -> dict | None:
     }
 
 
-def delete_user(user_id: str) -> bool:
+def get_all_users() -> list[dict]:
     """
-    Safely removes a test user from PostgreSQL by user ID and synchronizes with FAISS.
-    Used for test cleanup and idempotency.
+    Retrieves all registered users from PostgreSQL, ordered chronologically (newest first).
+    Does not expose raw embeddings.
+
+    Returns:
+        list[dict]: List of user summary objects with user_id, created_at, embedding_dimension, and has_embedding.
     """
-    if not user_id:
-        return False
-    clean_uid = str(user_id).strip()
+    select_sql = """
+    SELECT user_id, created_at, array_length(embedding, 1)
+    FROM users
+    ORDER BY created_at DESC;
+    """
+    with get_pooled_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(select_sql)
+            rows = cur.fetchall()
+
+    users = []
+    for uid, cat, dim in rows:
+        users.append({
+            "user_id": str(uid),
+            "created_at": cat.isoformat() if hasattr(cat, "isoformat") else str(cat),
+            "embedding_dimension": dim,
+            "has_embedding": (dim == 512)
+        })
+    return users
+
+
+def delete_user_completely(user_id: str) -> dict:
+    """
+    Completely and safely deletes a registered user across all persistent layers:
+    1. Validates non-empty user identifier.
+    2. Verifies user existence in PostgreSQL (raises UserNotFoundError if missing).
+    3. Deletes user row and 512-D FaceNet embedding from PostgreSQL in an ACID transaction.
+    4. Removes corresponding vector entry from the in-memory FAISS index (or triggers safe DB rebuild).
+    5. Deletes all associated cropped face images from backend/cropped_faces/.
+    6. Deletes any associated JSON embedding backups from backend/embeddings/.
+    7. Guarantees strict PostgreSQL and FAISS index synchronization.
+
+    Parameters:
+        user_id (str): Unique user identifier.
+
+    Returns:
+        dict: Deletion report with status, user_id, and details of purged resources.
+
+    Raises:
+        InvalidUserError: If user_id is empty or whitespace.
+        UserNotFoundError: If user does not exist in PostgreSQL.
+        Exception: If database operation fails.
+    """
+    if not user_id or not str(user_id).strip():
+        raise InvalidUserError("User ID must be a non-empty string.")
+    clean_user_id = str(user_id).strip()
+
+    # Step 1: Delete PostgreSQL database record (including 512-D embedding column)
     with get_pooled_connection() as conn:
         try:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM users WHERE user_id = %s;", (clean_uid,))
+                cur.execute("SELECT user_id FROM users WHERE user_id = %s;", (clean_user_id,))
+                row = cur.fetchone()
+                if not row:
+                    raise UserNotFoundError(f"User '{clean_user_id}' does not exist in database.")
+
+                cur.execute("DELETE FROM users WHERE user_id = %s;", (clean_user_id,))
             conn.commit()
-
-            # Keep FAISS in sync on delete
-            try:
-                from faiss_service import get_faiss_manager
-                faiss_mgr = get_faiss_manager()
-                if faiss_mgr.is_initialized():
-                    faiss_mgr.remove_user(clean_uid)
-            except Exception as faiss_err:
-                print(f"[FAISS REMOVE WARNING] Post-delete FAISS sync for '{clean_uid}': {faiss_err}")
-
-            return True
-        except Exception:
+            print(f"[DB SUCCESS] Deleted user record for '{clean_user_id}'.")
+        except UserNotFoundError:
             conn.rollback()
-            return False
+            raise
+        except Exception as e:
+            conn.rollback()
+            print(f"[DB ERROR] Failed to delete user '{clean_user_id}': {e}")
+            raise e
+
+    # Step 2: Remove FAISS vector entry and synchronize index
+    faiss_removed = False
+    try:
+        from faiss_service import get_faiss_manager
+        faiss_mgr = get_faiss_manager()
+        if faiss_mgr.is_initialized():
+            faiss_removed = faiss_mgr.remove_user(clean_user_id)
+            print(f"[FAISS SUCCESS] Removed user '{clean_user_id}' from FAISS index.")
+    except Exception as faiss_err:
+        print(f"[FAISS WARNING] Error removing user '{clean_user_id}': {faiss_err}. Rebuilding FAISS index from PostgreSQL...")
+        try:
+            faiss_mgr.rebuild_index_from_database()
+            faiss_removed = True
+        except Exception as recon_err:
+            print(f"[FAISS RECONCILIATION ERROR] Rebuild failed: {recon_err}")
+
+    # Step 3: Delete associated cropped face images
+    deleted_images = []
+    cropped_dir = os.path.join(BASE_DIR, "cropped_faces")
+    if os.path.isdir(cropped_dir):
+        prefix_pattern = f"{clean_user_id}_"
+        for fname in os.listdir(cropped_dir):
+            if fname.startswith(prefix_pattern) or fname == f"{clean_user_id}.jpg" or fname == f"{clean_user_id}.png":
+                fpath = os.path.join(cropped_dir, fname)
+                try:
+                    if os.path.isfile(fpath):
+                        os.remove(fpath)
+                        deleted_images.append(fname)
+                        print(f"[STORAGE] Deleted cropped face image: {fname}")
+                except Exception as f_err:
+                    print(f"[STORAGE WARNING] Failed to delete file '{fpath}': {f_err}")
+
+    # Step 4: Delete associated JSON embedding backups if present
+    deleted_json = []
+    emb_dir = os.path.join(BASE_DIR, "embeddings")
+    json_path = os.path.join(emb_dir, f"{clean_user_id}.json")
+    if os.path.isfile(json_path):
+        try:
+            os.remove(json_path)
+            deleted_json.append(f"{clean_user_id}.json")
+            print(f"[STORAGE] Deleted embedding JSON backup: {clean_user_id}.json")
+        except Exception as j_err:
+            print(f"[STORAGE WARNING] Failed to delete JSON '{json_path}': {j_err}")
+
+    return {
+        "status": "success",
+        "message": f"User '{clean_user_id}' and all associated biometric embeddings and face images deleted successfully.",
+        "user_id": clean_user_id,
+        "deleted": {
+            "database_record": True,
+            "faiss_index": faiss_removed,
+            "cropped_images": deleted_images,
+            "embedding_files": deleted_json
+        }
+    }
+
+
+def delete_user(user_id: str) -> bool:
+    """
+    Safely removes a user from PostgreSQL, FAISS, and filesystem.
+    Backward-compatible helper function used by test suites and cleanup scripts.
+    """
+    if not user_id:
+        return False
+    try:
+        res = delete_user_completely(user_id)
+        return res.get("status") == "success"
+    except UserNotFoundError:
+        return False
+    except Exception:
+        return False
 

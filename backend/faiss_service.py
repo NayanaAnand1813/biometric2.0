@@ -185,7 +185,8 @@ class FAISSIndexManager:
     def remove_user(self, user_id: str) -> bool:
         """
         Removes a user vector from the FAISS index and updates the internal ID mappings.
-        Used primarily for test cleanup.
+        If individual removal encounters any error or if index state becomes inconsistent,
+        safely falls back to rebuilding the FAISS index from the remaining database embeddings.
 
         Parameters:
             user_id (str): Unique user identifier.
@@ -201,25 +202,41 @@ class FAISSIndexManager:
             if clean_user_id not in self._user_id_to_index:
                 return False
 
-            idx = self._user_id_to_index[clean_user_id]
+            try:
+                idx = self._user_id_to_index[clean_user_id]
 
-            # IndexFlatIP supports remove_ids with an int64 numpy array
-            self._index.remove_ids(np.array([idx], dtype=np.int64))
+                # IndexFlatIP supports remove_ids with an int64 numpy array
+                self._index.remove_ids(np.array([idx], dtype=np.int64))
 
-            # FAISS IndexFlatIP shifts all vectors after the removed index down by 1
-            new_index_to_user_id: dict[int, str] = {}
-            new_user_id_to_index: dict[str, int] = {}
+                # FAISS IndexFlatIP shifts all vectors after the removed index down by 1
+                new_index_to_user_id: dict[int, str] = {}
+                new_user_id_to_index: dict[str, int] = {}
 
-            for old_idx, uid in self._index_to_user_id.items():
-                if uid == clean_user_id:
-                    continue
-                adjusted_idx = old_idx if old_idx < idx else old_idx - 1
-                new_index_to_user_id[adjusted_idx] = uid
-                new_user_id_to_index[uid] = adjusted_idx
+                for old_idx, uid in self._index_to_user_id.items():
+                    if uid == clean_user_id:
+                        continue
+                    adjusted_idx = old_idx if old_idx < idx else old_idx - 1
+                    new_index_to_user_id[adjusted_idx] = uid
+                    new_user_id_to_index[uid] = adjusted_idx
 
-            self._index_to_user_id = new_index_to_user_id
-            self._user_id_to_index = new_user_id_to_index
-            return True
+                self._index_to_user_id = new_index_to_user_id
+                self._user_id_to_index = new_user_id_to_index
+                return True
+            except Exception as rem_err:
+                print(
+                    f"[FAISS WARNING] Direct removal failed for user '{clean_user_id}': {rem_err}. "
+                    "Rebuilding entire FAISS index from PostgreSQL database embeddings..."
+                )
+                self.initialize_from_database()
+                return not self.contains_user(clean_user_id)
+
+    def rebuild_index_from_database(self) -> int:
+        """
+        Explicitly triggers a complete rebuild of the in-memory FAISS index
+        directly from all valid embeddings currently stored in PostgreSQL.
+        Guarantees strict 1:1 synchronization between PostgreSQL and FAISS.
+        """
+        return self.initialize_from_database()
 
     def search_top_k(
         self,

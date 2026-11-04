@@ -4,7 +4,7 @@ import threading
 import cv2
 import mediapipe as mp
 import numpy as np
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 
@@ -16,8 +16,11 @@ if BASE_DIR not in sys.path:
 from user_service import (
     register_user_with_embedding,
     get_user_embedding,
+    get_all_users,
+    delete_user_completely,
     UserAlreadyExistsError,
-    InvalidUserError
+    InvalidUserError,
+    UserNotFoundError
 )
 
 # Folder to store cropped faces
@@ -179,6 +182,49 @@ async def register_user_endpoint(
         )
 
 
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "admin_secret_key_2026")
+
+
+def verify_admin_key(
+    x_admin_key: str | None = Header(None, alias="X-Admin-Key"),
+    authorization: str | None = Header(None)
+):
+    """
+    Validates administrator credentials via X-Admin-Key header or Authorization: Bearer token.
+    Restricts administrative endpoints (such as user deletion) to authorized personnel.
+    """
+    token = x_admin_key
+    if not token and authorization:
+        if authorization.startswith("Bearer "):
+            token = authorization[7:].strip()
+        else:
+            token = authorization.strip()
+
+    if not token or token != ADMIN_API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": "Unauthorized", "message": "Admin authorization required to perform this action."}
+        )
+    return True
+
+
+@app.get("/users")
+@app.get("/api/users")
+async def list_users_endpoint():
+    """
+    Retrieves the list of all registered biometric users.
+    Returns user_id, registration timestamp, and embedding presence.
+    """
+    try:
+        users = await run_in_threadpool(get_all_users)
+        return {"status": "success", "users": users, "total": len(users)}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Database error", "message": str(e)}
+        )
+
+
 @app.get("/users/{user_id}")
 async def get_user_endpoint(user_id: str):
     """
@@ -191,6 +237,50 @@ async def get_user_endpoint(user_id: str):
             detail={"error": "Not Found", "message": f"User '{user_id}' not found."}
         )
     return user_data
+
+
+@app.delete("/users/{user_id}")
+@app.delete("/api/users/{user_id}")
+async def delete_user_endpoint(
+    user_id: str,
+    _admin: bool = Depends(verify_admin_key)
+):
+    """
+    Milestone 8 User Deletion Endpoint:
+    Completely and safely deletes a registered user:
+    - Verifies administrator authorization via X-Admin-Key or Authorization header.
+    - Purges the user record and 512-D FaceNet embedding from PostgreSQL.
+    - Removes their corresponding vector from the in-memory FAISS IndexFlatIP.
+    - Deletes their cropped face images from disk.
+    - Deletes any JSON embedding backup files.
+    - Safely handles missing users (404) and database failures (500).
+    - Preserves all other registered users and maintains PostgreSQL-FAISS synchronization.
+    """
+    clean_user_id = user_id.strip() if user_id else ""
+    if not clean_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Invalid user_id", "message": "User ID cannot be empty."}
+        )
+
+    try:
+        result = await run_in_threadpool(delete_user_completely, clean_user_id)
+        return result
+    except UserNotFoundError as nf_err:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "Not Found", "message": str(nf_err)}
+        )
+    except InvalidUserError as inv_err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Invalid user data", "message": str(inv_err)}
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Deletion failed", "message": str(e)}
+        )
 
 
 from generate_embedding import extract_face_embedding
