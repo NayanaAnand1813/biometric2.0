@@ -18,6 +18,11 @@ class UserAlreadyExistsError(Exception):
     pass
 
 
+class EmailAlreadyExistsError(Exception):
+    """Raised when an attempt is made to register an email address that already exists in the database."""
+    pass
+
+
 class InvalidUserError(Exception):
     """Raised when user data, ID, or image is invalid."""
     pass
@@ -30,41 +35,56 @@ class UserNotFoundError(Exception):
 
 def register_user_with_embedding(
     user_id: str,
+    full_name: str = None,
+    email: str = None,
+    role: str = None,
+    phone_number: str = None,
     image_path: str = None,
     face_bgr: np.ndarray = None,
     save_json: bool = False
 ) -> dict:
     """
-    Registers a new user in the PostgreSQL database with their 512-dimensional FaceNet embedding.
+    Registers a new user in the PostgreSQL database with their profile information
+    and their 512-dimensional FaceNet embedding.
 
     Workflow:
     1. Validates user ID.
-    2. Generates the 512-dimensional FaceNet embedding from either the in-memory cropped
+    2. Normalizes email (lowercase, stripped) and profile fields.
+    3. Generates the 512-dimensional FaceNet embedding from either the in-memory cropped
        face image (face_bgr) or file system path (image_path).
-    3. Validates embedding length and values.
-    4. Connects to PostgreSQL via the connection pool and inserts the user record
-       using parameterized queries.
-    5. Confirms successful transaction commit.
-    6. Synchronizes embedding to FAISS index ONLY post-commit.
+    4. Validates embedding length and values.
+    5. Connects to PostgreSQL via the connection pool and inserts the user record
+       with profile data using parameterized queries.
+    6. Confirms successful transaction commit.
+    7. Synchronizes embedding to FAISS index ONLY post-commit.
 
     Parameters:
         user_id (str): Unique user identifier.
+        full_name (str, optional): User's full name.
+        email (str, optional): User's work email address.
+        role (str, optional): User's role or designation.
+        phone_number (str, optional): User's contact phone number.
         image_path (str, optional): File system path to cropped face image.
         face_bgr (np.ndarray, optional): In-memory cropped face image in BGR format.
         save_json (bool): Deprecated legacy flag (retained for backward compatibility).
 
     Returns:
-        dict: Registration confirmation containing user_id, created_at, and embedding dimension.
+        dict: Registration confirmation containing user_id, profile fields, created_at, and embedding dimension.
 
     Raises:
         InvalidUserError: If user_id is empty or image is invalid.
-        UserAlreadyExistsError: If user_id already exists in the database (preventing silent overwrite).
+        UserAlreadyExistsError: If user_id already exists in the database.
+        EmailAlreadyExistsError: If email already exists in the database.
         ValueError: If embedding dimensions are not exactly 512.
         Exception: If database connection or query execution fails.
     """
     if not user_id or not str(user_id).strip():
         raise InvalidUserError("User ID must be a non-empty string.")
     clean_user_id = str(user_id).strip()
+    clean_full_name = str(full_name).strip() if full_name and str(full_name).strip() else None
+    clean_email = str(email).strip().lower() if email and str(email).strip() else None
+    clean_role = str(role).strip() if role and str(role).strip() else None
+    clean_phone = str(phone_number).strip() if phone_number and str(phone_number).strip() else None
 
     # Step 1: Generate FaceNet embedding via in-memory image or file path
     if face_bgr is not None:
@@ -95,25 +115,32 @@ def register_user_with_embedding(
             f"Pre-insertion validation failed: Expected 512 dimensions, got {len(embedding_vector)}."
         )
 
-    # Step 3: Insert user and embedding into PostgreSQL with parameterized SQL query
+    # Step 3: Insert user, profile, and embedding into PostgreSQL with parameterized SQL query
     insert_sql = """
-    INSERT INTO users (user_id, embedding)
-    VALUES (%s, %s)
-    RETURNING user_id, created_at, array_length(embedding, 1);
+    INSERT INTO users (user_id, full_name, email, role, phone_number, embedding)
+    VALUES (%s, %s, %s, %s, %s, %s)
+    RETURNING user_id, full_name, email, role, phone_number, created_at, array_length(embedding, 1);
     """
 
     with get_pooled_connection() as conn:
         try:
             with conn.cursor() as cur:
-                cur.execute(insert_sql, (clean_user_id, embedding_vector))
+                cur.execute(
+                    insert_sql,
+                    (clean_user_id, clean_full_name, clean_email, clean_role, clean_phone, embedding_vector)
+                )
                 row = cur.fetchone()
             conn.commit()
 
             confirmed_uid = row[0]
-            confirmed_created_at = row[1]
-            confirmed_dim = row[2]
+            confirmed_name = row[1]
+            confirmed_email = row[2]
+            confirmed_role = row[3]
+            confirmed_phone = row[4]
+            confirmed_created_at = row[5]
+            confirmed_dim = row[6]
 
-            print(f"[DB SUCCESS] Registered user '{confirmed_uid}' with {confirmed_dim}-D embedding.")
+            print(f"[DB SUCCESS] Registered user '{confirmed_uid}' with profile and {confirmed_dim}-D embedding.")
 
             # Step 4: Safe FAISS synchronization - Add to FAISS ONLY after successful DB commit
             try:
@@ -130,20 +157,71 @@ def register_user_with_embedding(
             return {
                 "status": "success",
                 "user_id": confirmed_uid,
+                "full_name": confirmed_name or "",
+                "email": confirmed_email or "",
+                "role": confirmed_role or "",
+                "phone_number": confirmed_phone or "",
                 "created_at": confirmed_created_at.isoformat() if hasattr(confirmed_created_at, "isoformat") else str(confirmed_created_at),
                 "embedding_dimension": confirmed_dim,
-                "message": "User registered and embedding stored successfully in PostgreSQL."
+                "message": "User registered and profile stored successfully in PostgreSQL."
             }
 
         except errors.UniqueViolation as uv_err:
             conn.rollback()
-            raise UserAlreadyExistsError(
-                f"User ID '{clean_user_id}' already exists in database. Registration rejected."
-            ) from uv_err
+            err_msg = str(uv_err).lower()
+            if "uq_users_email" in err_msg or "email" in err_msg:
+                raise EmailAlreadyExistsError(
+                    f"Email '{clean_email}' is already registered to another user."
+                ) from uv_err
+            else:
+                raise UserAlreadyExistsError(
+                    f"User ID '{clean_user_id}' already exists in database. Registration rejected."
+                ) from uv_err
         except Exception as e:
             conn.rollback()
             print(f"[DB ERROR] Failed to store user '{clean_user_id}': {e}")
             raise e
+
+
+def get_user_profile(user_id: str) -> dict | None:
+    """
+    Retrieves safe public profile for user without exposing embeddings or database internals.
+    Guarantees no biometric leakage: embedding is never selected or returned.
+
+    Parameters:
+        user_id (str): Unique user identifier.
+
+    Returns:
+        dict | None: Profile dictionary with user_id, full_name, email, role, phone_number,
+                     and created_at (or None if user not found).
+    """
+    if not user_id or not str(user_id).strip():
+        return None
+    clean_user_id = str(user_id).strip()
+
+    select_sql = """
+    SELECT user_id, full_name, email, role, phone_number, created_at
+    FROM users
+    WHERE user_id = %s;
+    """
+
+    with get_pooled_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(select_sql, (clean_user_id,))
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    uid, fname, mail, urole, phone, created_at_val = row
+    return {
+        "user_id": str(uid),
+        "full_name": str(fname) if fname else "",
+        "email": str(mail) if mail else "",
+        "role": str(urole) if urole else "",
+        "phone_number": str(phone) if phone else "",
+        "created_at": created_at_val.isoformat() if hasattr(created_at_val, "isoformat") else str(created_at_val)
+    }
 
 
 def get_user_embedding(user_id: str) -> dict | None:

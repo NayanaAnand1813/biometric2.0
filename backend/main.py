@@ -1,6 +1,7 @@
 import os
 import sys
 import threading
+import re
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -15,10 +16,12 @@ if BASE_DIR not in sys.path:
 
 from user_service import (
     register_user_with_embedding,
+    get_user_profile,
     get_user_embedding,
     get_all_users,
     delete_user_completely,
     UserAlreadyExistsError,
+    EmailAlreadyExistsError,
     InvalidUserError,
     UserNotFoundError
 )
@@ -74,11 +77,23 @@ def home():
     return {"message": "Biometric Backend is Running"}
 
 
-def _process_registration_sync(clean_user_id: str, img: np.ndarray) -> dict:
+EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
+PHONE_REGEX = re.compile(r"^\+?[0-9\s\-\(\)]{7,20}$")
+
+
+def _process_registration_sync(
+    clean_user_id: str,
+    full_name: str | None,
+    email: str | None,
+    role: str | None,
+    phone_number: str | None,
+    img: np.ndarray
+) -> dict:
     """
     Synchronous worker executed in worker threadpool to prevent event loop blocking:
     Performs face detection, cropping, FaceNet 512-D embedding generation,
-    and PostgreSQL persistence in isolated transaction.
+    and PostgreSQL persistence in an isolated transaction.
+    Cleans up any cropped face image file if database or FAISS insertion fails.
     """
     # 1. Convert BGR to RGB for MediaPipe
     rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -111,15 +126,32 @@ def _process_registration_sync(clean_user_id: str, img: np.ndarray) -> dict:
     cv2.imwrite(output_path, cropped_face)
 
     # 5. Generate FaceNet 512-D embedding and store in PostgreSQL
-    reg_result = register_user_with_embedding(
-        user_id=clean_user_id,
-        image_path=output_path
-    )
+    try:
+        reg_result = register_user_with_embedding(
+            user_id=clean_user_id,
+            full_name=full_name,
+            email=email,
+            role=role,
+            phone_number=phone_number,
+            image_path=output_path
+        )
+    except Exception as reg_err:
+        # Avoid partial registration: remove cropped face image if DB insertion or FAISS sync failed
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except Exception:
+                pass
+        raise reg_err
 
     return {
         "status": "success",
-        "message": "Face detected, embedding generated, and user registered successfully",
+        "message": "Face detected, embedding generated, and user profile registered successfully",
         "user_id": clean_user_id,
+        "full_name": reg_result.get("full_name", ""),
+        "email": reg_result.get("email", ""),
+        "role": reg_result.get("role", ""),
+        "phone_number": reg_result.get("phone_number", ""),
         "saved_image": output_path,
         "embedding_dimension": reg_result["embedding_dimension"],
         "created_at": reg_result["created_at"]
@@ -130,13 +162,18 @@ def _process_registration_sync(clean_user_id: str, img: np.ndarray) -> dict:
 @app.post("/register")
 async def register_user_endpoint(
     user_id: str = Form(...),
+    full_name: str | None = Form(None),
+    email: str | None = Form(None),
+    role: str | None = Form(None),
+    phone_number: str | None = Form(None),
     image: UploadFile = File(...)
 ):
     """
     Registration endpoint:
-    Receives user_id and face image, validates input, detects and crops face,
-    generates 512-D FaceNet embedding, and commits record into PostgreSQL.
-    Prevents duplicate user_id overwrites with 409 Conflict.
+    Receives user_id, profile fields (full_name, email, role, phone_number), and face image.
+    Validates input format, detects and crops face, generates 512-D FaceNet embedding,
+    and commits record into PostgreSQL with FAISS synchronization.
+    Prevents duplicate user_id and email overwrites with HTTP 409 Conflict.
     """
     clean_user_id = user_id.strip() if user_id else ""
     if not clean_user_id:
@@ -144,6 +181,41 @@ async def register_user_endpoint(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "Invalid user_id", "message": "User ID cannot be empty."}
         )
+
+    # Check and validate profile fields if any profile field is provided
+    has_profile_input = any(f is not None for f in (full_name, email, role, phone_number))
+    clean_full_name: str | None = None
+    clean_email: str | None = None
+    clean_role: str | None = None
+    clean_phone: str | None = None
+
+    if has_profile_input:
+        clean_full_name = full_name.strip() if full_name else ""
+        clean_email = email.strip().lower() if email else ""
+        clean_role = role.strip() if role else ""
+        clean_phone = phone_number.strip() if phone_number else ""
+
+        if not clean_full_name or not clean_email or not clean_role or not clean_phone:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": "Missing fields",
+                    "message": "All five fields (User ID, Full Name, Work Email, Role, Phone Number) are mandatory."
+                }
+            )
+
+        if not EMAIL_REGEX.match(clean_email):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "Invalid email", "message": "Invalid email format. Please provide a valid work email address."}
+            )
+
+        digits_only = re.sub(r"\D", "", clean_phone)
+        if not PHONE_REGEX.match(clean_phone) or len(digits_only) < 7:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "Invalid phone", "message": "Invalid phone number format. Please provide a valid contact number."}
+            )
 
     # Read uploaded image bytes
     image_data = await image.read()
@@ -162,12 +234,25 @@ async def register_user_endpoint(
 
     # Offload detection, embedding generation, and DB insertion to threadpool
     try:
-        result = await run_in_threadpool(_process_registration_sync, clean_user_id, img)
+        result = await run_in_threadpool(
+            _process_registration_sync,
+            clean_user_id,
+            clean_full_name,
+            clean_email,
+            clean_role,
+            clean_phone,
+            img
+        )
         return result
     except UserAlreadyExistsError as exist_err:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"error": "User already exists", "message": str(exist_err)}
+        )
+    except EmailAlreadyExistsError as mail_err:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": "Email already exists", "message": str(mail_err)}
         )
     except InvalidUserError as inv_err:
         raise HTTPException(
@@ -303,15 +388,18 @@ def get_biometric_threshold() -> float:
         return 0.70
 
 
-def _process_login_sync(clean_user_id: str, img: np.ndarray, image_size_bytes: int) -> dict:
+def _process_login_sync(clean_user_id: str | None, img: np.ndarray, image_size_bytes: int) -> dict:
     """
     Synchronous worker executed in worker threadpool for biometric login:
     1. BlazeFace face detection in memory (thread-safe under _detector_lock).
     2. In-memory face cropping (never saved to disk).
     3. FaceNet 512-D L2-normalized embedding extraction via shared extract_face_embedding.
     4. Exact 1:N FAISS IndexFlatIP cosine similarity search under _lock.
-    5. Identity matching: Top matching FAISS user_id must equal submitted user_id,
-       and similarity score must meet or exceed the configurable threshold.
+    5. Identity matching:
+       - If clean_user_id is None (1:N identification): Top matching FAISS identity
+         is verified against the biometric threshold. Unknown/unregistered faces are rejected.
+       - If clean_user_id is provided (1:1 verification): Top matching FAISS user_id
+         must equal clean_user_id and similarity must meet or exceed threshold.
     6. Return clean authenticated / denied response (no raw similarity scores exposed).
     """
     # 1. Convert BGR to RGB for MediaPipe
@@ -365,7 +453,8 @@ def _process_login_sync(clean_user_id: str, img: np.ndarray, image_size_bytes: i
 
     if not top_matches:
         # FAISS index is empty or has no enrolled users
-        print(f"[AUTH DENIED] FAISS index is empty. Denying authentication for claimed ID '{clean_user_id}'.")
+        claimed_info = f" for claimed ID '{clean_user_id}'" if clean_user_id else ""
+        print(f"[AUTH DENIED] FAISS index is empty. Denying authentication{claimed_info}.")
         return {
             "status": "failed",
             "authenticated": False,
@@ -374,14 +463,35 @@ def _process_login_sync(clean_user_id: str, img: np.ndarray, image_size_bytes: i
 
     top_user_id, similarity = top_matches[0]
 
-    # 6. Verify top matching FAISS user ID == submitted user_id AND similarity >= threshold
-    if top_user_id == clean_user_id and similarity >= threshold:
-        print(f"[AUTH SUCCESS] User '{clean_user_id}' authenticated. Score: {similarity:.4f} >= Threshold: {threshold:.4f}")
+    # 6. Verify identity match
+    if clean_user_id:
+        # Dual-gate 1:1 check: Top match must match claimed ID AND score >= threshold
+        is_authenticated = (top_user_id == clean_user_id and similarity >= threshold)
+        matched_user = clean_user_id
+    else:
+        # 1:N Identification check: Top match must meet or exceed threshold
+        is_authenticated = (similarity >= threshold)
+        matched_user = top_user_id
+
+    if is_authenticated:
+        profile = get_user_profile(matched_user)
+        if not profile:
+            profile = {
+                "user_id": matched_user,
+                "full_name": "",
+                "email": "",
+                "role": "",
+                "phone_number": "",
+                "created_at": ""
+            }
+        display_name = profile.get("full_name") or matched_user
+        print(f"[AUTH SUCCESS] User '{matched_user}' authenticated. Score: {similarity:.4f} >= Threshold: {threshold:.4f}")
         return {
             "status": "success",
             "authenticated": True,
-            "user_id": clean_user_id,
-            "message": f"Biometric authentication successful. Welcome, {clean_user_id}!",
+            "user_id": matched_user,
+            "user_profile": profile,
+            "message": f"Biometric authentication successful. Welcome, {display_name}!",
             "image_size_bytes": image_size_bytes
         }
     else:
@@ -398,23 +508,26 @@ def _process_login_sync(clean_user_id: str, img: np.ndarray, image_size_bytes: i
 
 @app.post("/login")
 async def login_endpoint(
-    user_id: str = Form(...),
+    user_id: str | None = Form(None),
     image: UploadFile = File(...)
 ):
     """
-    Milestone 7 Wave 2 Biometric Authentication Endpoint:
-    Receives User ID and face image from frontend.
+    Biometric Authentication Endpoint:
+    Supports both 1:N face identification (no user_id required) and 1:1 claimed identity verification.
     Offloads in-memory face detection, shared FaceNet embedding, and FAISS exact
     search to the worker threadpool.
     Does not save login images or embeddings to disk or database.
     Does not expose raw similarity scores to the client.
     """
-    clean_user_id = user_id.strip() if user_id else ""
-    if not clean_user_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": "Invalid user_id", "message": "User ID cannot be empty."}
-        )
+    clean_user_id: str | None = None
+    if user_id is not None:
+        trimmed = user_id.strip()
+        if not trimmed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "Invalid user_id", "message": "User ID cannot be empty."}
+            )
+        clean_user_id = trimmed
 
     # Read uploaded image bytes
     image_data = await image.read()

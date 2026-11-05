@@ -15,6 +15,10 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS embedding REAL[];
+ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR(255);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(255);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(100);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_number VARCHAR(50);
 
 DO $$
 BEGIN
@@ -23,6 +27,12 @@ BEGIN
     ) THEN
         ALTER TABLE users ADD CONSTRAINT check_embedding_dim 
         CHECK (embedding IS NULL OR (array_ndims(embedding) = 1 AND array_length(embedding, 1) = 512));
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'uq_users_email'
+    ) THEN
+        ALTER TABLE users ADD CONSTRAINT uq_users_email UNIQUE (email);
     END IF;
 END $$;
 """
