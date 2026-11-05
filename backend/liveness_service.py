@@ -325,7 +325,6 @@ class LivenessService:
         candidates.extend([
             os.path.join(project_root, "liveliness", "weights", "MiniFASNetV1SE.pth"),
             os.path.join(current_dir, "weights", "MiniFASNetV1SE.pth"),
-            os.path.join(project_root, "face-anti-spoofing", "weights", "MiniFASNetV1SE.pth"),
         ])
 
         for path in candidates:
