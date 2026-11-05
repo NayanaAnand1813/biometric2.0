@@ -27,6 +27,8 @@ def test_milestone5_all():
     test_image_path = os.path.join(os.path.dirname(__file__), "cropped_faces", "1804_face.jpg")
     if not os.path.exists(test_image_path):
         test_image_path = os.path.join(os.path.dirname(__file__), "cropped_faces", "1234_face.jpg")
+    if not os.path.exists(test_image_path):
+        test_image_path = os.path.join(os.path.dirname(__file__), "test_fixtures", "test_face.jpg")
     assert os.path.exists(test_image_path), f"Base test image missing at {test_image_path}"
 
     test_users_to_clean = []

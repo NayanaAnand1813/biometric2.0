@@ -20,5 +20,8 @@ numpy==2.5.4
 scipy==1.18.1
 httpx==0.28.1
 faiss-cpu==1.15.1
+torch==2.15.0
+onnxruntime==1.31.1
+uniface==4.2.1
 
 

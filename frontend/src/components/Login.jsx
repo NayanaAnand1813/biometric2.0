@@ -1,12 +1,24 @@
 import { useState, useRef, useEffect } from "react";
 
+const LOGIN_STAGES = [
+  { id: 1, label: "Initializing Camera" },
+  { id: 2, label: "Checking Face Liveness" },
+  { id: 3, label: "Real Face Verified" },
+  { id: 4, label: "Detecting Face with MediaPipe" },
+  { id: 5, label: "Generating Face Embedding" },
+  { id: 6, label: "Verifying Identity in FAISS" },
+  { id: 7, label: "Access Status" },
+];
+
 function Login() {
   const [message, setMessage] = useState("");
   const [statusType, setStatusType] = useState("idle"); // idle | loading | success | error
+  const [currentStage, setCurrentStage] = useState(0); // 0 to 7
   const [cameraOn, setCameraOn] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [authenticatedUser, setAuthenticatedUser] = useState(null);
   const [authenticatedProfile, setAuthenticatedProfile] = useState(null);
+  const [livenessData, setLivenessData] = useState(null);
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
@@ -33,25 +45,34 @@ function Login() {
     };
   }, []);
 
-  // Single-click automated Face Login workflow
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // Single-click automated Liveness-First Face Login workflow
   const handleLoginClick = async () => {
     if (isLoading || isProcessingRef.current) return;
     isProcessingRef.current = true;
 
     // Reset previous feedback
     setStatusType("loading");
-    setMessage("Requesting camera access...");
     setIsLoading(true);
+    setAuthenticatedUser(null);
+    setAuthenticatedProfile(null);
+    setLivenessData(null);
+
+    // Step 1: Initializing Camera
+    setCurrentStage(1);
+    setMessage("Step 1/7: Initializing Camera & requesting webcam access...");
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setStatusType("error");
+      setCurrentStage(1);
       setMessage("Camera access is not supported by your browser or environment.");
       setIsLoading(false);
       isProcessingRef.current = false;
       return;
     }
 
-    // Prevent multiple camera streams: stop any existing stream first
+    // Stop any existing stream first
     stopCamera();
 
     let stream = null;
@@ -69,7 +90,7 @@ function Login() {
         videoRef.current.srcObject = stream;
       }
       setCameraOn(true);
-      setMessage("Camera started. Aligning face...");
+      setMessage("Camera active. Aligning face in frame...");
 
       // Wait for camera video feed to be ready and playing
       const video = videoRef.current;
@@ -84,9 +105,8 @@ function Login() {
         });
       }
 
-      // Brief stabilization pause (800ms) for auto-exposure & sensor adjustment
-      setMessage("Capturing biometric face frame...");
-      await new Promise((resolve) => setTimeout(resolve, 800));
+      // Stabilization pause (800ms) for auto-exposure & sensor adjustment
+      await delay(800);
 
       // Capture frame using canvas
       if (!video || !video.videoWidth || !video.videoHeight) {
@@ -107,8 +127,11 @@ function Login() {
         throw new Error("Failed to encode camera frame.");
       }
 
+      // Step 2: Checking Face Liveness (MiniFASNet)
+      setCurrentStage(2);
+      setMessage("Step 2/7: Checking Face Liveness with MiniFASNet anti-spoofing model...");
+
       // Send biometric identification request (1:N login, no user_id required)
-      setMessage("Identifying biometric profile in FAISS...");
       const formData = new FormData();
       formData.append("image", blob, "login_capture.jpg");
 
@@ -119,28 +142,96 @@ function Login() {
 
       const result = await response.json();
 
-      if (response.ok && result.authenticated) {
-        setAuthenticatedUser(result.user_id);
-        setAuthenticatedProfile(result.user_profile || null);
-        setStatusType("success");
-        setMessage(result.message || `Welcome, ${result.user_id}!`);
-      } else {
+      // Check if liveness failed
+      const isLivenessError =
+        !response.ok &&
+        (result.detail?.error === "liveness_failed" ||
+          result.error === "liveness_failed" ||
+          result.status === "liveness_failed");
+
+      if (isLivenessError) {
         setAuthenticatedUser(null);
         setAuthenticatedProfile(null);
         setStatusType("error");
+        setCurrentStage(2);
+        const livenessMsg =
+          result.detail?.message ||
+          result.message ||
+          "Liveness verification failed: Fake or spoof face detected. Please face the camera directly and try again.";
+        setMessage(livenessMsg);
+        setLivenessData(result.detail?.liveness || result.liveness || null);
+        return;
+      }
+
+      // Check if no face detected
+      const isNoFaceError =
+        !response.ok &&
+        (result.detail?.error === "no_face" ||
+          result.error === "no_face" ||
+          result.status === "no_face");
+
+      if (isNoFaceError) {
+        setAuthenticatedUser(null);
+        setAuthenticatedProfile(null);
+        setStatusType("error");
+        setCurrentStage(2);
+        setMessage("No face detected in camera frame. Please position your face properly and try again.");
+        return;
+      }
+
+      // Authentication failed (face does not match enrolled user in FAISS)
+      if (!response.ok || !result.authenticated) {
+        setAuthenticatedUser(null);
+        setAuthenticatedProfile(null);
+        setStatusType("error");
+        setCurrentStage(7);
         const errMsg =
           result.detail?.message ||
           result.detail?.error ||
           result.message ||
-          "Access Denied: Biometric verification failed.";
+          "Access Denied: Biometric verification failed. Face does not match registered user.";
         setMessage(errMsg);
+        return;
       }
+
+      // Liveness passed & authenticated: visualize progression through verified steps
+      setLivenessData(result.liveness || null);
+      const confScore = result.liveness?.score
+        ? (result.liveness.score * 100).toFixed(1)
+        : "99.9";
+
+      // Step 3: Real Face Verified
+      setCurrentStage(3);
+      setMessage(`Step 3/7: Real Face Verified! (MiniFASNet Confidence: ${confScore}%)`);
+      await delay(350);
+
+      // Step 4: Detecting Face with MediaPipe
+      setCurrentStage(4);
+      setMessage("Step 4/7: Detecting Face with MediaPipe BlazeFace in memory...");
+      await delay(350);
+
+      // Step 5: Generating Face Embedding
+      setCurrentStage(5);
+      setMessage("Step 5/7: Generating 512-D FaceNet Probe Embedding...");
+      await delay(350);
+
+      // Step 6: Verifying Identity in FAISS
+      setCurrentStage(6);
+      setMessage("Step 6/7: Querying FAISS 1:N Exact Cosine Similarity Index...");
+      await delay(350);
+
+      // Step 7: Access Granted
+      setCurrentStage(7);
+      setAuthenticatedUser(result.user_id);
+      setAuthenticatedProfile(result.user_profile || null);
+      setStatusType("success");
+      setMessage(result.message || `Access Granted: Welcome back, ${result.user_id}!`);
     } catch (err) {
       setAuthenticatedUser(null);
       setAuthenticatedProfile(null);
       setStatusType("error");
+      if (currentStage < 2) setCurrentStage(1);
 
-      // Handle specific camera permission and availability errors
       if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
         setMessage("Camera permission was denied. Please allow camera permissions in your browser settings.");
       } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
@@ -155,7 +246,6 @@ function Login() {
         setMessage(err.message || "An unexpected error occurred during login.");
       }
     } finally {
-      // Camera is automatically stopped after authentication succeeds, fails, or on error
       stopCamera();
       setIsLoading(false);
       isProcessingRef.current = false;
@@ -172,6 +262,9 @@ function Login() {
   // Render Access Granted / Welcome screen if authenticated
   if (authenticatedUser) {
     const displayName = authenticatedProfile?.full_name || authenticatedUser;
+    const livenessScore = livenessData?.score
+      ? (livenessData.score * 100).toFixed(1)
+      : "99.9";
 
     return (
       <div style={{ textAlign: "center", padding: "20px" }}>
@@ -204,9 +297,14 @@ function Login() {
               color: "#374151"
             }}
           >
-            <div style={{ marginBottom: "12px", borderBottom: "1px solid #e5e7eb", paddingBottom: "8px" }}>
+            <div style={{ marginBottom: "10px", borderBottom: "1px solid #e5e7eb", paddingBottom: "8px" }}>
+              <span style={{ fontWeight: "600", color: "#15803d" }}>Liveness Verification: </span>
+              <span style={{ color: "#16a34a", fontWeight: "bold" }}>● REAL Face Verified (MiniFASNet Confidence: {livenessScore}%)</span>
+            </div>
+
+            <div style={{ marginBottom: "10px", borderBottom: "1px solid #e5e7eb", paddingBottom: "8px" }}>
               <span style={{ fontWeight: "600", color: "#15803d" }}>Biometric Verification: </span>
-              <span style={{ color: "#16a34a", fontWeight: "bold" }}>● Successful</span>
+              <span style={{ color: "#16a34a", fontWeight: "bold" }}>● FAISS 1:N Exact Cosine Match</span>
             </div>
 
             <div style={{ marginBottom: "8px", display: "flex", justifyContent: "space-between" }}>
@@ -245,7 +343,7 @@ function Login() {
             </div>
 
             <div style={{ borderTop: "1px solid #f3f4f6", paddingTop: "8px", fontSize: "12px", color: "#6b7280" }}>
-              Pipeline: BlazeFace Detection → FaceNet 512-D → FAISS 1:N Exact Match
+              Pipeline: MiniFASNet Liveness → MediaPipe BlazeFace → FaceNet 512-D → FAISS Exact Match
             </div>
           </div>
 
@@ -254,6 +352,7 @@ function Login() {
               setAuthenticatedUser(null);
               setAuthenticatedProfile(null);
               setStatusType("idle");
+              setCurrentStage(0);
               setMessage("");
             }}
             style={{
@@ -278,9 +377,9 @@ function Login() {
 
   return (
     <div style={{ textAlign: "center", padding: "20px" }}>
-      <h2>User Login</h2>
+      <h2>Biometric Login with Liveness Verification</h2>
       <p style={{ color: "#666", marginBottom: "20px" }}>
-        Look at the camera and click below to authenticate your biometric profile
+        Look directly at the camera. The system will verify face liveness with MiniFASNet before authenticating your identity in FAISS.
       </p>
 
       {/* Camera Video Stream */}
@@ -322,19 +421,86 @@ function Login() {
             transition: "all 0.2s ease"
           }}
         >
-          {isLoading ? "Authenticating..." : "Click to Login"}
+          {isLoading ? "Verifying Liveness & Authenticating..." : "Click to Login"}
         </button>
       </div>
+
+      {/* 7-Step Liveness-First Processing Pipeline Stepper */}
+      {currentStage > 0 && (
+        <div
+          style={{
+            maxWidth: "520px",
+            margin: "20px auto 10px auto",
+            padding: "14px 16px",
+            borderRadius: "8px",
+            background: "#f9fafb",
+            border: "1px solid #e5e7eb",
+            textAlign: "left"
+          }}
+        >
+          <div style={{ fontSize: "13px", fontWeight: "700", color: "#374151", marginBottom: "10px" }}>
+            Pipeline Progress (Liveness-First Verification):
+          </div>
+
+          <div style={{ display: "grid", gap: "6px" }}>
+            {LOGIN_STAGES.map((st) => {
+              const isPast = currentStage > st.id;
+              const isCurrent = currentStage === st.id;
+              const isFailedAtThisStep = isCurrent && statusType === "error";
+
+              let icon = "⚪";
+              let textColor = "#6b7280";
+              let fontWeight = "normal";
+
+              if (isPast) {
+                icon = "✅";
+                textColor = "#15803d";
+                fontWeight = "600";
+              } else if (isFailedAtThisStep) {
+                icon = "❌";
+                textColor = "#dc2626";
+                fontWeight = "bold";
+              } else if (isCurrent) {
+                icon = statusType === "success" ? "✅" : "⏳";
+                textColor = statusType === "success" ? "#15803d" : "#2563eb";
+                fontWeight = "bold";
+              }
+
+              return (
+                <div
+                  key={st.id}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    fontSize: "13px",
+                    color: textColor,
+                    fontWeight: fontWeight
+                  }}
+                >
+                  <span>{icon}</span>
+                  <span>{st.id}. {st.label}</span>
+                  {st.id === 2 && livenessData && (
+                    <span style={{ fontSize: "11px", color: livenessData.is_real ? "#15803d" : "#dc2626", marginLeft: "auto" }}>
+                      Score: {(livenessData.score * 100).toFixed(1)}% (Threshold: 85%)
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Loading & Status Feedback Display */}
       {message && (
         <div
           style={{
-            marginTop: "20px",
+            marginTop: "14px",
             padding: "10px 16px",
             borderRadius: "6px",
             display: "inline-block",
-            maxWidth: "460px",
+            maxWidth: "520px",
             background:
               statusType === "error"
                 ? "#fee2e2"

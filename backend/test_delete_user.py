@@ -29,7 +29,11 @@ async def test_delete_user_suite():
     test_image_path = os.path.join(BASE_DIR, "cropped_faces", "1804_face.jpg")
     if not os.path.exists(test_image_path):
         test_image_path = os.path.join(BASE_DIR, "cropped_faces", "1234_face.jpg")
+    if not os.path.exists(test_image_path):
+        test_image_path = os.path.join(BASE_DIR, "test_fixtures", "test_face.jpg")
     assert os.path.exists(test_image_path), "Test face image fixture missing."
+    with open(test_image_path, "rb") as f:
+        valid_jpeg_bytes = f.read()
 
     timestamp = int(time.time())
     user_victim = f"del_user_{timestamp}"
@@ -46,19 +50,25 @@ async def test_delete_user_suite():
         # Setup: Register two users
         # -------------------------------------------------------------
         print("\n[Setup] Registering victim and survivor users...")
-        reg1 = register_user_with_embedding(user_victim, image_path=test_image_path)
-        reg2 = register_user_with_embedding(user_survivor, image_path=test_image_path)
+        reg1_resp = await client.post(
+            "/upload",
+            data={"user_id": user_victim},
+            files={"image": ("face.jpg", valid_jpeg_bytes, "image/jpeg")}
+        )
+        assert reg1_resp.status_code == 200, f"Victim setup registration failed: {reg1_resp.text}"
 
-        assert reg1["status"] == "success"
-        assert reg2["status"] == "success"
+        reg2_resp = await client.post(
+            "/upload",
+            data={"user_id": user_survivor},
+            files={"image": ("face.jpg", valid_jpeg_bytes, "image/jpeg")}
+        )
+        assert reg2_resp.status_code == 200, f"Survivor setup registration failed: {reg2_resp.text}"
 
         faiss_mgr = get_faiss_manager()
         assert faiss_mgr.contains_user(user_victim), "Victim not indexed in FAISS!"
         assert faiss_mgr.contains_user(user_survivor), "Survivor not indexed in FAISS!"
 
-        # Ensure a test cropped face image exists for user_victim
         victim_img_path = os.path.join(BASE_DIR, "cropped_faces", f"{user_victim}_face.jpg")
-        cv2.imwrite(victim_img_path, cv2.imread(test_image_path))
         assert os.path.exists(victim_img_path), "Victim face image could not be created."
         print(f"  - Registered '{user_victim}' and created fixture image: {victim_img_path}")
         print(f"  - Registered '{user_survivor}' as control subject.")

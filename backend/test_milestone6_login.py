@@ -29,10 +29,15 @@ async def test_milestone6_login_pipeline():
 
     # Pre-register registered_user_101 with the test face image so they exist as a registered user
     delete_user("registered_user_101")
-    register_user_with_embedding("registered_user_101", image_path=test_image_path)
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        reg_resp = await client.post(
+            "/upload",
+            data={"user_id": "registered_user_101"},
+            files={"image": ("face.jpg", valid_jpeg_bytes, "image/jpeg")}
+        )
+        assert reg_resp.status_code == 200, f"Setup registration failed: {reg_resp.text}"
 
         # -------------------------------------------------------------
         # Test 1: Successful login image reception & verification (Valid User ID & JPEG)

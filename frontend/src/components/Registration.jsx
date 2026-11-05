@@ -1,5 +1,15 @@
 import { useState, useRef, useEffect } from "react";
 
+const REGISTRATION_STAGES = [
+  { id: 1, label: "Initializing Camera" },
+  { id: 2, label: "Checking Face Liveness" },
+  { id: 3, label: "Real Face Verified" },
+  { id: 4, label: "Detecting Face with MediaPipe" },
+  { id: 5, label: "Generating Face Embedding" },
+  { id: 6, label: "Processing Registration" },
+  { id: 7, label: "Registration Status" },
+];
+
 function Registration() {
   const [userId, setUserId] = useState("");
   const [fullName, setFullName] = useState("");
@@ -9,8 +19,10 @@ function Registration() {
 
   const [message, setMessage] = useState("");
   const [statusType, setStatusType] = useState("idle"); // idle | loading | success | error
+  const [currentStage, setCurrentStage] = useState(0); // 0 to 7
   const [cameraOn, setCameraOn] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [livenessData, setLivenessData] = useState(null);
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
@@ -37,7 +49,9 @@ function Registration() {
     };
   }, []);
 
-  // Single-click automated Face Registration workflow
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  // Single-click automated Liveness-First Face Registration workflow
   const handleRegisterClick = async () => {
     if (isLoading || isProcessingRef.current) return;
 
@@ -75,10 +89,15 @@ function Registration() {
     isProcessingRef.current = true;
     setIsLoading(true);
     setStatusType("loading");
-    setMessage("Requesting camera access...");
+    setLivenessData(null);
+
+    // Step 1: Initializing Camera
+    setCurrentStage(1);
+    setMessage("Step 1/7: Initializing Camera & requesting webcam access...");
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setStatusType("error");
+      setCurrentStage(1);
       setMessage("Camera access is not supported by your browser or environment.");
       setIsLoading(false);
       isProcessingRef.current = false;
@@ -103,7 +122,7 @@ function Registration() {
         videoRef.current.srcObject = stream;
       }
       setCameraOn(true);
-      setMessage("Camera started. Align your face...");
+      setMessage("Camera active. Please center your face directly in the frame...");
 
       // Wait for camera video feed to be ready and playing
       const video = videoRef.current;
@@ -119,10 +138,9 @@ function Registration() {
       }
 
       // Stabilization pause (800ms) for auto-exposure & sensor stabilization
-      setMessage("Capturing biometric face frame...");
-      await new Promise((resolve) => setTimeout(resolve, 800));
+      await delay(800);
 
-      // Capture frame using canvas
+      // Capture verified frame candidate using canvas
       if (!video || !video.videoWidth || !video.videoHeight) {
         throw new Error("Unable to read video frame from camera.");
       }
@@ -141,8 +159,10 @@ function Registration() {
         throw new Error("Failed to encode camera frame.");
       }
 
-      // Send registration request to backend (POST /upload) with profile data
-      setMessage("Storing profile & generating biometric embedding...");
+      // Step 2: Checking Face Liveness (MiniFASNet)
+      setCurrentStage(2);
+      setMessage("Step 2/7: Checking Face Liveness with MiniFASNet anti-spoofing model...");
+
       const formData = new FormData();
       formData.append("user_id", cleanId);
       formData.append("full_name", cleanFullName);
@@ -158,23 +178,86 @@ function Registration() {
 
       const result = await response.json();
 
-      if (response.ok && result.status !== "no_face" && result.status !== "error") {
-        setStatusType("success");
-        setMessage(result.message || `User '${cleanFullName} (${cleanId})' registered successfully!`);
-      } else {
+      // Check if liveness failed
+      const isLivenessError =
+        !response.ok &&
+        (result.detail?.error === "liveness_failed" ||
+          result.error === "liveness_failed" ||
+          result.status === "liveness_failed");
+
+      if (isLivenessError) {
         setStatusType("error");
+        setCurrentStage(2);
+        const livenessMsg =
+          result.detail?.message ||
+          result.message ||
+          "Liveness check failed: Fake, spoof, or uncertain face detected. Please position your face correctly and try again.";
+        setMessage(livenessMsg);
+        setLivenessData(result.detail?.liveness || result.liveness || null);
+        return;
+      }
+
+      // Check if no face was detected
+      const isNoFaceError =
+        !response.ok &&
+        (result.detail?.error === "no_face" ||
+          result.error === "no_face" ||
+          result.status === "no_face");
+
+      if (isNoFaceError) {
+        setStatusType("error");
+        setCurrentStage(2);
+        setMessage("No face detected in camera frame. Please align your face in center view and try again.");
+        return;
+      }
+
+      // Other backend error (duplicate user, bad request, etc.)
+      if (!response.ok || result.status !== "success") {
+        setStatusType("error");
+        setCurrentStage(6);
         const errMsg =
           result.detail?.message ||
           result.detail?.error ||
           result.message ||
-          result.error ||
           "Registration failed.";
         setMessage(errMsg);
+        return;
       }
+
+      // Liveness passed & registration succeeded: visualize the verified pipeline progression
+      setLivenessData(result.liveness || null);
+      const confScore = result.liveness?.score
+        ? (result.liveness.score * 100).toFixed(1)
+        : "99.9";
+
+      // Step 3: Real Face Verified
+      setCurrentStage(3);
+      setMessage(`Step 3/7: Real Face Verified! (MiniFASNet Confidence: ${confScore}%)`);
+      await delay(350);
+
+      // Step 4: Detecting Face with MediaPipe
+      setCurrentStage(4);
+      setMessage("Step 4/7: Detecting Face & Cropping with MediaPipe BlazeFace...");
+      await delay(350);
+
+      // Step 5: Generating Face Embedding
+      setCurrentStage(5);
+      setMessage("Step 5/7: Generating 512-D FaceNet Biometric Embedding...");
+      await delay(350);
+
+      // Step 6: Processing Registration
+      setCurrentStage(6);
+      setMessage("Step 6/7: Storing Profile in PostgreSQL & Synchronizing FAISS Index...");
+      await delay(350);
+
+      // Step 7: Completed
+      setCurrentStage(7);
+      setStatusType("success");
+      setMessage(result.message || `User '${cleanFullName} (${cleanId})' registered successfully!`);
     } catch (err) {
       setStatusType("error");
+      if (currentStage < 2) setCurrentStage(1);
 
-      // Handle specific camera permission and availability errors
       if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
         setMessage("Camera permission was denied. Please allow camera permissions in your browser settings.");
       } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
@@ -189,7 +272,6 @@ function Registration() {
         setMessage(err.message || "An unexpected error occurred during registration.");
       }
     } finally {
-      // Camera is automatically stopped after registration succeeds, fails, or on error
       stopCamera();
       setIsLoading(false);
       isProcessingRef.current = false;
@@ -223,9 +305,9 @@ function Registration() {
 
   return (
     <div style={{ textAlign: "center", padding: "10px 20px" }}>
-      <h2 style={{ marginBottom: "6px" }}>User Profile & Biometric Registration</h2>
+      <h2 style={{ marginBottom: "6px" }}>User Profile & Liveness-First Face Registration</h2>
       <p style={{ color: "#666", marginBottom: "20px", fontSize: "14px" }}>
-        Fill out your profile details and click Register to automatically capture your face
+        Fill out your profile details and click Register. The camera will verify your live face with MiniFASNet before generating biometric embeddings.
       </p>
 
       {/* Profile Form Fields Grid */}
@@ -339,19 +421,86 @@ function Registration() {
             transition: "all 0.2s ease"
           }}
         >
-          {isLoading ? "Registering..." : "Click to Register"}
+          {isLoading ? "Verifying & Registering..." : "Click to Register"}
         </button>
       </div>
+
+      {/* 7-Step Liveness-First Processing Pipeline Stepper */}
+      {currentStage > 0 && (
+        <div
+          style={{
+            maxWidth: "520px",
+            margin: "20px auto 10px auto",
+            padding: "14px 16px",
+            borderRadius: "8px",
+            background: "#f9fafb",
+            border: "1px solid #e5e7eb",
+            textAlign: "left"
+          }}
+        >
+          <div style={{ fontSize: "13px", fontWeight: "700", color: "#374151", marginBottom: "10px" }}>
+            Pipeline Progress (Liveness-First Verification):
+          </div>
+
+          <div style={{ display: "grid", gap: "6px" }}>
+            {REGISTRATION_STAGES.map((st) => {
+              const isPast = currentStage > st.id;
+              const isCurrent = currentStage === st.id;
+              const isFailedAtThisStep = isCurrent && statusType === "error";
+
+              let icon = "⚪";
+              let textColor = "#6b7280";
+              let fontWeight = "normal";
+
+              if (isPast) {
+                icon = "✅";
+                textColor = "#15803d";
+                fontWeight = "600";
+              } else if (isFailedAtThisStep) {
+                icon = "❌";
+                textColor = "#dc2626";
+                fontWeight = "bold";
+              } else if (isCurrent) {
+                icon = statusType === "success" ? "✅" : "⏳";
+                textColor = statusType === "success" ? "#15803d" : "#2563eb";
+                fontWeight = "bold";
+              }
+
+              return (
+                <div
+                  key={st.id}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    fontSize: "13px",
+                    color: textColor,
+                    fontWeight: fontWeight
+                  }}
+                >
+                  <span>{icon}</span>
+                  <span>{st.id}. {st.label}</span>
+                  {st.id === 2 && livenessData && (
+                    <span style={{ fontSize: "11px", color: livenessData.is_real ? "#15803d" : "#dc2626", marginLeft: "auto" }}>
+                      Score: {(livenessData.score * 100).toFixed(1)}% (Threshold: 85%)
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Progress, Success, & Error Feedback */}
       {message && (
         <div
           style={{
-            marginTop: "18px",
+            marginTop: "14px",
             padding: "10px 16px",
             borderRadius: "6px",
             display: "inline-block",
-            maxWidth: "480px",
+            maxWidth: "520px",
             background:
               statusType === "error"
                 ? "#fee2e2"

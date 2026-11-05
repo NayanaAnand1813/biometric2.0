@@ -25,6 +25,7 @@ from user_service import (
     InvalidUserError,
     UserNotFoundError
 )
+from liveness_service import get_liveness_service, get_liveness_threshold
 
 # Folder to store cropped faces
 CROPPED_FACES_DIR = os.path.join(BASE_DIR, "cropped_faces")
@@ -60,8 +61,9 @@ app.add_middleware(
 @app.on_event("startup")
 def startup_event():
     """
-    On FastAPI server startup, initialize the in-memory FAISS IndexFlatIP(512)
-    from PostgreSQL. PostgreSQL remains the permanent source of truth.
+    On FastAPI server startup:
+    1. Initialize in-memory FAISS IndexFlatIP(512) from PostgreSQL.
+    2. Initialize MiniFASNetV1SE liveness model (fail-closed security).
     """
     try:
         from faiss_service import get_faiss_manager
@@ -70,6 +72,15 @@ def startup_event():
         print(f"[STARTUP] Initialized FAISS index with {count} enrolled user embeddings.")
     except Exception as e:
         print(f"[STARTUP WARNING] Could not initialize FAISS from database: {e}")
+
+    try:
+        liveness_svc = get_liveness_service()
+        if liveness_svc.is_available():
+            print(f"[STARTUP] MiniFASNetV1SE liveness model loaded (REAL threshold: {get_liveness_threshold()}).")
+        else:
+            print("[STARTUP CRITICAL] MiniFASNet liveness service failed to load. Pipeline will fail closed.")
+    except Exception as e:
+        print(f"[STARTUP CRITICAL] Could not initialize liveness service: {e}")
 
 
 @app.get("/")
@@ -90,26 +101,58 @@ def _process_registration_sync(
     img: np.ndarray
 ) -> dict:
     """
-    Synchronous worker executed in worker threadpool to prevent event loop blocking:
-    Performs face detection, cropping, FaceNet 512-D embedding generation,
-    and PostgreSQL persistence in an isolated transaction.
-    Cleans up any cropped face image file if database or FAISS insertion fails.
+    Synchronous worker executed in worker threadpool enforcing Liveness-First registration:
+    Step 2: MiniFASNetV1SE face anti-spoofing liveness check.
+            Rejects fake, replay, uncertain, or low-confidence inputs immediately.
+    Step 3: Exact verified frame retained upon REAL confirmation.
+    Step 4: MediaPipe BlazeFace face detection and cropping.
+    Step 5: FaceNet 512-D embedding extraction via shared pipeline.
+    Step 6: PostgreSQL atomic persistence and FAISS IndexFlatIP synchronization.
     """
-    # 1. Convert BGR to RGB for MediaPipe
-    rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    # --------------------------------------------------------------------------
+    # Step 2: MiniFASNet Liveness Detection
+    # --------------------------------------------------------------------------
+    liveness_svc = get_liveness_service()
+    liveness_res = liveness_svc.verify_liveness(img)
+
+    if liveness_res.get("status") == "no_face":
+        return {
+            "status": "no_face",
+            "message": "No face detected in camera frame. Please align your face with the camera.",
+            "liveness": liveness_res
+        }
+
+    if not liveness_res.get("is_real", False):
+        return {
+            "status": "liveness_failed",
+            "message": liveness_res.get("message", "Liveness check failed: Real face could not be verified."),
+            "liveness": liveness_res
+        }
+
+    # --------------------------------------------------------------------------
+    # Step 3: Capture / Retain Verified Image (exact frame that passed liveness)
+    # --------------------------------------------------------------------------
+    verified_img = img
+
+    # --------------------------------------------------------------------------
+    # Step 4: MediaPipe BlazeFace Face Detection and Cropping
+    # --------------------------------------------------------------------------
+    rgb_image = cv2.cvtColor(verified_img, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(
         image_format=mp.ImageFormat.SRGB,
         data=rgb_image
     )
 
-    # 2. Thread-safe face detection
     with _detector_lock:
         detection_result = detector.detect(mp_image)
 
     if not detection_result.detections:
-        return {"status": "no_face", "message": "No face detected"}
+        return {
+            "status": "no_face",
+            "message": "MediaPipe BlazeFace did not detect a valid face in the verified frame.",
+            "liveness": liveness_res
+        }
 
-    # 3. Crop first detected face
     detection = detection_result.detections[0]
     bbox = detection.bounding_box
     x = max(0, bbox.origin_x)
@@ -117,15 +160,20 @@ def _process_registration_sync(
     w = max(1, bbox.width)
     h = max(1, bbox.height)
 
-    cropped_face = img[y:y+h, x:x+w]
+    cropped_face = verified_img[y:y+h, x:x+w]
     if cropped_face.size == 0:
-        return {"status": "no_face", "message": "No face detected"}
+        return {
+            "status": "no_face",
+            "message": "Invalid face crop from verified frame.",
+            "liveness": liveness_res
+        }
 
-    # 4. Save cropped face image (isolated per user ID)
+    # --------------------------------------------------------------------------
+    # Step 5 & 6: FaceNet Embedding Generation & PostgreSQL / FAISS Registration
+    # --------------------------------------------------------------------------
     output_path = os.path.join(CROPPED_FACES_DIR, f"{clean_user_id}_face.jpg")
     cv2.imwrite(output_path, cropped_face)
 
-    # 5. Generate FaceNet 512-D embedding and store in PostgreSQL
     try:
         reg_result = register_user_with_embedding(
             user_id=clean_user_id,
@@ -146,7 +194,7 @@ def _process_registration_sync(
 
     return {
         "status": "success",
-        "message": "Face detected, embedding generated, and user profile registered successfully",
+        "message": "Real face verified, embedding generated, and user profile registered successfully",
         "user_id": clean_user_id,
         "full_name": reg_result.get("full_name", ""),
         "email": reg_result.get("email", ""),
@@ -154,7 +202,8 @@ def _process_registration_sync(
         "phone_number": reg_result.get("phone_number", ""),
         "saved_image": output_path,
         "embedding_dimension": reg_result["embedding_dimension"],
-        "created_at": reg_result["created_at"]
+        "created_at": reg_result["created_at"],
+        "liveness": liveness_res
     }
 
 
@@ -243,7 +292,27 @@ async def register_user_endpoint(
             clean_phone,
             img
         )
+        if result.get("status") == "liveness_failed":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": "liveness_failed",
+                    "message": result.get("message"),
+                    "liveness": result.get("liveness")
+                }
+            )
+        if result.get("status") == "no_face":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": "no_face",
+                    "message": result.get("message"),
+                    "liveness": result.get("liveness")
+                }
+            )
         return result
+    except HTTPException:
+        raise
     except UserAlreadyExistsError as exist_err:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -390,26 +459,55 @@ def get_biometric_threshold() -> float:
 
 def _process_login_sync(clean_user_id: str | None, img: np.ndarray, image_size_bytes: int) -> dict:
     """
-    Synchronous worker executed in worker threadpool for biometric login:
-    1. BlazeFace face detection in memory (thread-safe under _detector_lock).
-    2. In-memory face cropping (never saved to disk).
-    3. FaceNet 512-D L2-normalized embedding extraction via shared extract_face_embedding.
-    4. Exact 1:N FAISS IndexFlatIP cosine similarity search under _lock.
-    5. Identity matching:
-       - If clean_user_id is None (1:N identification): Top matching FAISS identity
-         is verified against the biometric threshold. Unknown/unregistered faces are rejected.
-       - If clean_user_id is provided (1:1 verification): Top matching FAISS user_id
-         must equal clean_user_id and similarity must meet or exceed threshold.
-    6. Return clean authenticated / denied response (no raw similarity scores exposed).
+    Synchronous worker executed in worker threadpool for biometric login enforcing
+    Liveness-First verification:
+    Step 2: MiniFASNetV1SE face anti-spoofing liveness check.
+            Rejects spoof, fake photograph, screen replay, or low-confidence inputs immediately.
+            MediaPipe BlazeFace, FaceNet, and FAISS are strictly NOT called if liveness fails.
+    Step 3: Exact verified frame retained upon REAL confirmation.
+    Step 4: MediaPipe BlazeFace face detection and in-memory cropping (never saved to disk).
+    Step 5: FaceNet 512-D L2-normalized embedding extraction via shared extract_face_embedding.
+    Step 6: Exact 1:N FAISS IndexFlatIP cosine similarity search under _lock.
     """
-    # 1. Convert BGR to RGB for MediaPipe
-    rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    # --------------------------------------------------------------------------
+    # Step 2: MiniFASNet Liveness Detection
+    # --------------------------------------------------------------------------
+    liveness_svc = get_liveness_service()
+    liveness_res = liveness_svc.verify_liveness(img)
+
+    if liveness_res.get("status") == "no_face":
+        return {
+            "status": "error",
+            "error_type": "no_face",
+            "authenticated": False,
+            "message": "No face detected in the captured image. Please center your face and try again.",
+            "liveness": liveness_res
+        }
+
+    if not liveness_res.get("is_real", False):
+        return {
+            "status": "liveness_failed",
+            "error_type": "liveness_failed",
+            "authenticated": False,
+            "message": liveness_res.get("message", "Liveness verification failed: Real face could not be verified."),
+            "liveness": liveness_res
+        }
+
+    # --------------------------------------------------------------------------
+    # Step 3: Retain Verified Image (exact frame that passed liveness)
+    # --------------------------------------------------------------------------
+    verified_img = img
+
+    # --------------------------------------------------------------------------
+    # Step 4: MediaPipe BlazeFace Face Detection and In-Memory Cropping
+    # --------------------------------------------------------------------------
+    rgb_image = cv2.cvtColor(verified_img, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(
         image_format=mp.ImageFormat.SRGB,
         data=rgb_image
     )
 
-    # 2. Thread-safe face detection
+    # Thread-safe face detection
     with _detector_lock:
         detection_result = detector.detect(mp_image)
 
@@ -417,10 +515,12 @@ def _process_login_sync(clean_user_id: str | None, img: np.ndarray, image_size_b
         return {
             "status": "error",
             "error_type": "no_face",
-            "message": "No face detected in the captured image. Please center your face and try again."
+            "authenticated": False,
+            "message": "MediaPipe BlazeFace did not detect a face in the verified frame. Please center your face.",
+            "liveness": liveness_res
         }
 
-    # 3. Crop first detected face in memory (NO disk write)
+    # Crop first detected face in memory (NO disk write)
     detection = detection_result.detections[0]
     bbox = detection.bounding_box
     x = max(0, bbox.origin_x)
@@ -428,25 +528,33 @@ def _process_login_sync(clean_user_id: str | None, img: np.ndarray, image_size_b
     w = max(1, bbox.width)
     h = max(1, bbox.height)
 
-    cropped_face = img[y:y+h, x:x+w]
+    cropped_face = verified_img[y:y+h, x:x+w]
     if cropped_face.size == 0:
         return {
             "status": "error",
             "error_type": "no_face",
-            "message": "No face detected in the captured image."
+            "authenticated": False,
+            "message": "Failed to crop face region from verified frame.",
+            "liveness": liveness_res
         }
 
-    # 4. Extract 512-D L2-normalized embedding using shared pipeline (in memory)
+    # --------------------------------------------------------------------------
+    # Step 5: FaceNet 512-D Embedding Generation
+    # --------------------------------------------------------------------------
     try:
         probe_embedding = extract_face_embedding(cropped_face)
     except Exception as emb_err:
         return {
             "status": "error",
             "error_type": "embedding_failed",
-            "message": f"Failed to extract biometric features: {emb_err}"
+            "authenticated": False,
+            "message": f"Failed to extract biometric features: {emb_err}",
+            "liveness": liveness_res
         }
 
-    # 5. Search FAISS index for top matching enrolled identity
+    # --------------------------------------------------------------------------
+    # Step 6: 1:N FAISS Index Identification & Authentication
+    # --------------------------------------------------------------------------
     faiss_mgr = get_faiss_manager()
     top_matches = faiss_mgr.search_top_k(probe_embedding, k=1)
     threshold = get_biometric_threshold()
@@ -458,12 +566,13 @@ def _process_login_sync(clean_user_id: str | None, img: np.ndarray, image_size_b
         return {
             "status": "failed",
             "authenticated": False,
-            "message": "Biometric verification failed. Face does not match registered user."
+            "message": "Biometric verification failed. Face does not match registered user.",
+            "liveness": liveness_res
         }
 
     top_user_id, similarity = top_matches[0]
 
-    # 6. Verify identity match
+    # Verify identity match
     if clean_user_id:
         # Dual-gate 1:1 check: Top match must match claimed ID AND score >= threshold
         is_authenticated = (top_user_id == clean_user_id and similarity >= threshold)
@@ -492,7 +601,8 @@ def _process_login_sync(clean_user_id: str | None, img: np.ndarray, image_size_b
             "user_id": matched_user,
             "user_profile": profile,
             "message": f"Biometric authentication successful. Welcome, {display_name}!",
-            "image_size_bytes": image_size_bytes
+            "image_size_bytes": image_size_bytes,
+            "liveness": liveness_res
         }
     else:
         print(
@@ -502,7 +612,8 @@ def _process_login_sync(clean_user_id: str | None, img: np.ndarray, image_size_b
         return {
             "status": "failed",
             "authenticated": False,
-            "message": "Biometric verification failed. Face does not match registered user."
+            "message": "Biometric verification failed. Face does not match registered user.",
+            "liveness": liveness_res
         }
 
 
@@ -550,6 +661,17 @@ async def login_endpoint(
     # Offload CPU-bound face detection, FaceNet inference, and FAISS search to threadpool
     result = await run_in_threadpool(_process_login_sync, clean_user_id, img, len(image_data))
 
+    if result.get("status") == "liveness_failed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "liveness_failed",
+                "authenticated": False,
+                "message": result.get("message"),
+                "liveness": result.get("liveness")
+            }
+        )
+
     if result.get("status") == "error":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -567,4 +689,34 @@ async def login_endpoint(
         )
 
     return result
+
+
+@app.post("/check-liveness")
+@app.post("/api/liveness")
+async def check_liveness_endpoint(image: UploadFile = File(...)):
+    """
+    Dedicated endpoint to evaluate face anti-spoofing liveness using MiniFASNetV1SE.
+    Enables pre-verification checks without invoking FaceNet, database mutations,
+    or FAISS operations.
+    """
+    image_data = await image.read()
+    if not image_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Empty file", "message": "Uploaded image file is empty."}
+        )
+
+    np_array = np.frombuffer(image_data, np.uint8)
+    img = cv2.imdecode(np_array, cv2.IMREAD_COLOR)
+
+    if img is None or img.size == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "Invalid image", "message": "Failed to decode image. Expected valid JPEG/PNG."}
+        )
+
+    liveness_svc = get_liveness_service()
+    res = await run_in_threadpool(liveness_svc.verify_liveness, img)
+    return res
+
 
