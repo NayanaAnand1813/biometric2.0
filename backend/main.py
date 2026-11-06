@@ -26,6 +26,7 @@ from user_service import (
     UserNotFoundError
 )
 from liveness_service import get_liveness_service, get_liveness_threshold
+from liveness_session import get_liveness_session_manager
 
 # Folder to store cropped faces
 CROPPED_FACES_DIR = os.path.join(BASE_DIR, "cropped_faces")
@@ -181,7 +182,7 @@ def _process_registration_sync(
             email=email,
             role=role,
             phone_number=phone_number,
-            image_path=output_path
+            face_bgr=cropped_face
         )
     except Exception as reg_err:
         # Avoid partial registration: remove cropped face image if DB insertion or FAISS sync failed
@@ -207,9 +208,101 @@ def _process_registration_sync(
     }
 
 
-@app.post("/upload")
+@app.post("/api/liveness/session/start")
+async def start_liveness_session_endpoint(
+    action: str = Form(...),
+    user_id: str | None = Form(None)
+):
+    """
+    Step 1: Starts a backend-issued liveness verification session for live webcam capture.
+    Enforces camera-only face registration and login workflows.
+    """
+    clean_action = action.strip().lower() if action else ""
+    if clean_action not in ("register", "login"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_action", "message": "Action must be 'register' or 'login'."}
+        )
+
+    clean_user = user_id.strip() if user_id and user_id.strip() else None
+    session_mgr = get_liveness_session_manager()
+    session = session_mgr.create_session(action=clean_action, user_id=clean_user)
+
+    return {
+        "status": "success",
+        "message": f"Live webcam liveness session started for '{clean_action}'.",
+        "session": session.to_dict()
+    }
+
+
+@app.post("/api/liveness/session/verify-frame")
+async def verify_liveness_frame_endpoint(
+    session_id: str = Form(...),
+    image: UploadFile = File(...)
+):
+    """
+    Step 2: Receives live webcam frames during an active session and executes
+    MiniFASNetV1SE anti-spoofing verification.
+    Only updates session to 'verified' when a genuine real face meets or exceeds threshold.
+    """
+    clean_session_id = session_id.strip() if session_id else ""
+    session_mgr = get_liveness_session_manager()
+    session = session_mgr.get_session(clean_session_id)
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "session_not_found", "message": "Liveness session not found or expired. Please restart the camera."}
+        )
+
+    if session.is_expired():
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail={"error": "session_expired", "message": "Liveness session has expired. Please restart the camera."}
+        )
+
+    if session.is_consumed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "session_consumed", "message": "Liveness session was already used."}
+        )
+
+    image_data = await image.read()
+    if not image_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "empty_frame", "message": "Webcam frame data is empty."}
+        )
+
+    np_array = np.frombuffer(image_data, np.uint8)
+    img = cv2.imdecode(np_array, cv2.IMREAD_COLOR)
+
+    if img is None or img.size == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_frame", "message": "Failed to decode camera frame."}
+        )
+
+    liveness_svc = get_liveness_service()
+    liveness_res = await run_in_threadpool(liveness_svc.verify_liveness, img)
+
+    is_verified, msg, session_dict = session_mgr.record_verification_result(clean_session_id, liveness_res)
+
+    return {
+        "status": liveness_res.get("status"),
+        "is_real": liveness_res.get("is_real", False),
+        "score": liveness_res.get("score", 0.0),
+        "threshold": liveness_res.get("threshold", 0.85),
+        "label": liveness_res.get("label", "Unknown"),
+        "message": msg,
+        "verified": is_verified,
+        "session": session_dict
+    }
+
+
 @app.post("/register")
 async def register_user_endpoint(
+    session_id: str = Form(...),
     user_id: str = Form(...),
     full_name: str | None = Form(None),
     email: str | None = Form(None),
@@ -219,11 +312,24 @@ async def register_user_endpoint(
 ):
     """
     Registration endpoint:
-    Receives user_id, profile fields (full_name, email, role, phone_number), and face image.
+    Enforces camera-only face registration following successful live liveness detection.
+    Direct API requests without a verified backend liveness session are strictly rejected (HTTP 403).
+    Receives user_id, profile fields (full_name, email, role, phone_number), and the verified live webcam frame.
     Validates input format, detects and crops face, generates 512-D FaceNet embedding,
     and commits record into PostgreSQL with FAISS synchronization.
     Prevents duplicate user_id and email overwrites with HTTP 409 Conflict.
     """
+    session_mgr = get_liveness_session_manager()
+    is_valid_session, session_err, session = session_mgr.validate_and_consume(
+        session_id=session_id,
+        expected_action="register"
+    )
+    if not is_valid_session:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": "liveness_verification_required", "message": session_err}
+        )
+
     clean_user_id = user_id.strip() if user_id else ""
     if not clean_user_id:
         raise HTTPException(
@@ -457,9 +563,9 @@ def get_biometric_threshold() -> float:
         return 0.70
 
 
-def _process_login_sync(clean_user_id: str | None, img: np.ndarray, image_size_bytes: int) -> dict:
+def _process_login_sync(img: np.ndarray, image_size_bytes: int) -> dict:
     """
-    Synchronous worker executed in worker threadpool for biometric login enforcing
+    Synchronous worker executed in worker threadpool for biometric 1:N identification enforcing
     Liveness-First verification:
     Step 2: MiniFASNetV1SE face anti-spoofing liveness check.
             Rejects spoof, fake photograph, screen replay, or low-confidence inputs immediately.
@@ -467,7 +573,8 @@ def _process_login_sync(clean_user_id: str | None, img: np.ndarray, image_size_b
     Step 3: Exact verified frame retained upon REAL confirmation.
     Step 4: MediaPipe BlazeFace face detection and in-memory cropping (never saved to disk).
     Step 5: FaceNet 512-D L2-normalized embedding extraction via shared extract_face_embedding.
-    Step 6: Exact 1:N FAISS IndexFlatIP cosine similarity search under _lock.
+    Step 6: Pure 1:N FAISS IndexFlatIP cosine similarity identification against all enrolled users.
+            Retrieves matched user's profile from PostgreSQL on threshold match.
     """
     # --------------------------------------------------------------------------
     # Step 2: MiniFASNet Liveness Detection
@@ -553,16 +660,14 @@ def _process_login_sync(clean_user_id: str | None, img: np.ndarray, image_size_b
         }
 
     # --------------------------------------------------------------------------
-    # Step 6: 1:N FAISS Index Identification & Authentication
+    # Step 6: Pure 1:N FAISS Index Identification & Authentication
     # --------------------------------------------------------------------------
     faiss_mgr = get_faiss_manager()
     top_matches = faiss_mgr.search_top_k(probe_embedding, k=1)
     threshold = get_biometric_threshold()
 
     if not top_matches:
-        # FAISS index is empty or has no enrolled users
-        claimed_info = f" for claimed ID '{clean_user_id}'" if clean_user_id else ""
-        print(f"[AUTH DENIED] FAISS index is empty. Denying authentication{claimed_info}.")
+        print("[AUTH DENIED] FAISS index is empty. Denying authentication.")
         return {
             "status": "failed",
             "authenticated": False,
@@ -572,33 +677,26 @@ def _process_login_sync(clean_user_id: str | None, img: np.ndarray, image_size_b
 
     top_user_id, similarity = top_matches[0]
 
-    # Verify identity match
-    if clean_user_id:
-        # Dual-gate 1:1 check: Top match must match claimed ID AND score >= threshold
-        is_authenticated = (top_user_id == clean_user_id and similarity >= threshold)
-        matched_user = clean_user_id
-    else:
-        # 1:N Identification check: Top match must meet or exceed threshold
-        is_authenticated = (similarity >= threshold)
-        matched_user = top_user_id
+    # Pure 1:N Identification check: Top match across all enrolled users must meet or exceed threshold
+    is_authenticated = (similarity >= threshold)
 
     if is_authenticated:
-        profile = get_user_profile(matched_user)
+        profile = get_user_profile(top_user_id)
         if not profile:
             profile = {
-                "user_id": matched_user,
+                "user_id": top_user_id,
                 "full_name": "",
                 "email": "",
                 "role": "",
                 "phone_number": "",
                 "created_at": ""
             }
-        display_name = profile.get("full_name") or matched_user
-        print(f"[AUTH SUCCESS] User '{matched_user}' authenticated. Score: {similarity:.4f} >= Threshold: {threshold:.4f}")
+        display_name = profile.get("full_name") or top_user_id
+        print(f"[AUTH SUCCESS] User '{top_user_id}' identified via 1:N search. Score: {similarity:.4f} >= Threshold: {threshold:.4f}")
         return {
             "status": "success",
             "authenticated": True,
-            "user_id": matched_user,
+            "user_id": top_user_id,
             "user_profile": profile,
             "message": f"Biometric authentication successful. Welcome, {display_name}!",
             "image_size_bytes": image_size_bytes,
@@ -606,8 +704,8 @@ def _process_login_sync(clean_user_id: str | None, img: np.ndarray, image_size_b
         }
     else:
         print(
-            f"[AUTH DENIED] Claimed: '{clean_user_id}', Top Match: '{top_user_id}', "
-            f"Similarity: {similarity:.4f}, Threshold: {threshold:.4f}"
+            f"[AUTH DENIED] Top Match: '{top_user_id}', "
+            f"Similarity: {similarity:.4f} < Threshold: {threshold:.4f}. Unknown or unverified face."
         )
         return {
             "status": "failed",
@@ -619,26 +717,30 @@ def _process_login_sync(clean_user_id: str | None, img: np.ndarray, image_size_b
 
 @app.post("/login")
 async def login_endpoint(
-    user_id: str | None = Form(None),
+    session_id: str = Form(...),
     image: UploadFile = File(...)
 ):
     """
-    Biometric Authentication Endpoint:
-    Supports both 1:N face identification (no user_id required) and 1:1 claimed identity verification.
+    1:N Biometric Authentication Endpoint:
+    Identifies the individual exclusively through 1:N facial search across the enrolled FAISS index.
+    Does not require or accept User ID, username, or email.
+    Enforces camera-only face login following successful live liveness detection.
+    Direct API requests without a verified backend liveness session are strictly rejected (HTTP 403).
     Offloads in-memory face detection, shared FaceNet embedding, and FAISS exact
-    search to the worker threadpool.
+    1:N search to the worker threadpool.
     Does not save login images or embeddings to disk or database.
     Does not expose raw similarity scores to the client.
     """
-    clean_user_id: str | None = None
-    if user_id is not None:
-        trimmed = user_id.strip()
-        if not trimmed:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"error": "Invalid user_id", "message": "User ID cannot be empty."}
-            )
-        clean_user_id = trimmed
+    session_mgr = get_liveness_session_manager()
+    is_valid_session, session_err, session = session_mgr.validate_and_consume(
+        session_id=session_id,
+        expected_action="login"
+    )
+    if not is_valid_session:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": "liveness_verification_required", "message": session_err}
+        )
 
     # Read uploaded image bytes
     image_data = await image.read()
@@ -658,8 +760,8 @@ async def login_endpoint(
             detail={"error": "Invalid image", "message": "Failed to decode image. Expected valid JPEG/PNG format."}
         )
 
-    # Offload CPU-bound face detection, FaceNet inference, and FAISS search to threadpool
-    result = await run_in_threadpool(_process_login_sync, clean_user_id, img, len(image_data))
+    # Offload CPU-bound face detection, FaceNet inference, and FAISS 1:N search to threadpool
+    result = await run_in_threadpool(_process_login_sync, img, len(image_data))
 
     if result.get("status") == "liveness_failed":
         raise HTTPException(

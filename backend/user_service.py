@@ -9,7 +9,7 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from database import get_pooled_connection
-from generate_embedding import generate_embedding, extract_face_embedding
+from generate_embedding import extract_face_embedding
 import numpy as np
 
 
@@ -39,8 +39,8 @@ def register_user_with_embedding(
     email: str = None,
     role: str = None,
     phone_number: str = None,
-    image_path: str = None,
     face_bgr: np.ndarray = None,
+    image_path: str = None,
     save_json: bool = False
 ) -> dict:
     """
@@ -50,13 +50,14 @@ def register_user_with_embedding(
     Workflow:
     1. Validates user ID.
     2. Normalizes email (lowercase, stripped) and profile fields.
-    3. Generates the 512-dimensional FaceNet embedding from either the in-memory cropped
-       face image (face_bgr) or file system path (image_path).
-    4. Validates embedding length and values.
-    5. Connects to PostgreSQL via the connection pool and inserts the user record
+    3. Strictly enforces in-memory live webcam capture (face_bgr).
+       Rejects file-based registration (image_path) to guarantee biometric authenticity.
+    4. Generates the 512-dimensional FaceNet embedding using extract_face_embedding().
+    5. Validates embedding length (512) and finite values.
+    6. Connects to PostgreSQL via the connection pool and inserts the user record
        with profile data using parameterized queries.
-    6. Confirms successful transaction commit.
-    7. Synchronizes embedding to FAISS index ONLY post-commit.
+    7. Confirms successful transaction commit.
+    8. Synchronizes embedding to FAISS index ONLY post-commit.
 
     Parameters:
         user_id (str): Unique user identifier.
@@ -64,15 +65,15 @@ def register_user_with_embedding(
         email (str, optional): User's work email address.
         role (str, optional): User's role or designation.
         phone_number (str, optional): User's contact phone number.
-        image_path (str, optional): File system path to cropped face image.
-        face_bgr (np.ndarray, optional): In-memory cropped face image in BGR format.
+        face_bgr (np.ndarray): In-memory cropped face image in BGR format from live webcam.
+        image_path (str, optional): Forbidden legacy parameter; if provided, registration is rejected.
         save_json (bool): Deprecated legacy flag (retained for backward compatibility).
 
     Returns:
         dict: Registration confirmation containing user_id, profile fields, created_at, and embedding dimension.
 
     Raises:
-        InvalidUserError: If user_id is empty or image is invalid.
+        InvalidUserError: If user_id is empty, face_bgr is missing/invalid, or image_path is supplied.
         UserAlreadyExistsError: If user_id already exists in the database.
         EmailAlreadyExistsError: If email already exists in the database.
         ValueError: If embedding dimensions are not exactly 512.
@@ -86,28 +87,24 @@ def register_user_with_embedding(
     clean_role = str(role).strip() if role and str(role).strip() else None
     clean_phone = str(phone_number).strip() if phone_number and str(phone_number).strip() else None
 
-    # Step 1: Generate FaceNet embedding via in-memory image or file path
-    if face_bgr is not None:
-        try:
-            embedding_arr = extract_face_embedding(face_bgr)
-            embedding_vector = [float(x) for x in embedding_arr]
-            embedding_dim = len(embedding_vector)
-        except Exception as emb_err:
-            raise InvalidUserError(f"Failed to generate embedding: {emb_err}") from emb_err
-    else:
-        try:
-            embedding_result = generate_embedding(
-                user_id=clean_user_id,
-                image_path=image_path,
-                save_json=save_json
-            )
-        except FileNotFoundError as fnf_err:
-            raise InvalidUserError(f"Cropped face image not found: {fnf_err}") from fnf_err
-        except ValueError as val_err:
-            raise InvalidUserError(f"Failed to generate embedding: {val_err}") from val_err
+    # Step 1: Reject file-based registration and strictly enforce in-memory live webcam frame
+    if image_path is not None:
+        raise InvalidUserError(
+            "File-based registration via image_path is strictly prohibited. "
+            "Face images must originate exclusively from verified live webcam capture."
+        )
 
-        embedding_vector = embedding_result["embedding"]
-        embedding_dim = embedding_result["embedding_dimension"]
+    if face_bgr is None or not isinstance(face_bgr, np.ndarray) or face_bgr.size == 0:
+        raise InvalidUserError(
+            "A valid in-memory webcam face frame (face_bgr) is strictly required for registration."
+        )
+
+    try:
+        embedding_arr = extract_face_embedding(face_bgr)
+        embedding_vector = [float(x) for x in embedding_arr]
+        embedding_dim = len(embedding_vector)
+    except Exception as emb_err:
+        raise InvalidUserError(f"Failed to generate embedding: {emb_err}") from emb_err
 
     # Step 2: Validate embedding dimension before database insertion
     if embedding_dim != 512 or len(embedding_vector) != 512:

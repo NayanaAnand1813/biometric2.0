@@ -102,8 +102,9 @@ async def run_cleanup_verification():
         delete_user(test_new_uid)
 
         try:
-            # Register via user_service
-            reg_result = register_user_with_embedding(test_new_uid, image_path=fixture_image_path)
+            # Register via user_service using in-memory frame
+            fixture_bgr = cv2.imread(fixture_image_path)
+            reg_result = register_user_with_embedding(test_new_uid, face_bgr=fixture_bgr)
             assert reg_result["status"] == "success"
             assert reg_result["user_id"] == test_new_uid
             assert reg_result["embedding_dimension"] == 512

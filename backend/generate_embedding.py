@@ -81,9 +81,12 @@ def extract_face_embedding(face_bgr: np.ndarray) -> np.ndarray:
 
 def generate_embedding(user_id: str, image_path: str, save_json: bool = False) -> dict:
     """
-    Generates a 512-dimensional FaceNet embedding for a given cropped face image
-    and associates it with the provided user ID. Delegates to the shared
-    extract_face_embedding function.
+    [DEPRECATED FOR REGISTRATION] Generates a 512-dimensional FaceNet embedding for
+    an offline cropped face image on disk. Delegates to extract_face_embedding().
+
+    NOTE: Production registration strictly enforces in-memory live webcam capture via
+    extract_face_embedding(). File-based registration is prohibited. This utility is
+    retained solely for offline batch utilities and diagnostic fixture validation.
 
     Parameters:
         user_id (str): The unique identifier for the user.

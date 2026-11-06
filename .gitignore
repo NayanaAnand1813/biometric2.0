@@ -5,6 +5,8 @@ backend/venv/
 backend/facenet_env/
 __pycache__/
 *.pyc
+.pytest_cache/
+.agent/
 
 # React
 node_modules/
@@ -16,6 +18,5 @@ dist/
 # Editor
 .vscode/
 
-# Biometric face images and generated embeddings
-backend/cropped_faces/
+# generated embeddings
 backend/embeddings/

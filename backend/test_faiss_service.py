@@ -157,9 +157,10 @@ def test_faiss_initialization_from_postgres():
     # Register temporary test user in DB
     test_uid = f"faiss_db_init_test_{int(time.time())}"
     test_img = available_faces[0]
+    test_bgr = cv2.imread(test_img)
 
     try:
-        reg_res = register_user_with_embedding(test_uid, image_path=test_img)
+        reg_res = register_user_with_embedding(test_uid, face_bgr=test_bgr)
         assert reg_res["status"] == "success"
 
         # Initialize global FAISS manager from PostgreSQL
@@ -194,9 +195,10 @@ def test_faiss_safe_synchronization_and_rollback():
 
     conflict_uid = f"faiss_conflict_user_{int(time.time())}"
     test_img = available_faces[0]
+    conflict_bgr = cv2.imread(test_img)
 
     # Step 1: Successful registration adds to DB and FAISS
-    reg1 = register_user_with_embedding(conflict_uid, image_path=test_img)
+    reg1 = register_user_with_embedding(conflict_uid, face_bgr=conflict_bgr)
     assert reg1["status"] == "success"
     assert faiss_mgr.get_user_count() == initial_count + 1
     assert faiss_mgr.contains_user(conflict_uid) is True
@@ -206,7 +208,7 @@ def test_faiss_safe_synchronization_and_rollback():
     count_before_conflict = faiss_mgr.get_user_count()
     duplicate_raised = False
     try:
-        register_user_with_embedding(conflict_uid, image_path=test_img)
+        register_user_with_embedding(conflict_uid, face_bgr=conflict_bgr)
     except UserAlreadyExistsError:
         duplicate_raised = True
 

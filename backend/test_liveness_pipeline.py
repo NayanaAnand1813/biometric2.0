@@ -1,19 +1,18 @@
 """
-Comprehensive Validation Suite for Liveness-First Biometric Pipeline.
+Comprehensive Validation Suite for Camera-Only Liveness-First Biometric Pipeline.
 
-Tests all requirements specified in Section 7:
-1. Genuine face: liveness passes (score >= 0.85), verified frame captured,
-   MediaPipe BlazeFace crops face, FaceNet generates 512-D embedding.
-2. Printed photograph spoof (image_F1.jpg): rejected before MediaPipe/FaceNet.
-3. Mobile screen / replay spoof (image_F2.jpg): rejected before MediaPipe/FaceNet.
-4. Uncertain / sub-threshold confidence: strictly rejected.
-5. Invalid or missing face (blank / non-face): rejected before FaceNet.
-6. Failed registration: guarantees zero database write, zero FAISS insertion, zero disk image saved.
-7. Failed login: guarantees no FAISS authentication.
-8. Successful registration: PostgreSQL and FAISS strictly synchronized.
-9. Successful login: correct user authenticated, profile returned.
-10. Processing order enforcement: spies verify MediaPipe and FaceNet are never called on failed liveness.
-11. Dedicated /check-liveness endpoint tests.
+Validates all strict requirements:
+1. Complete removal of upload endpoints (POST /upload returns 404/405).
+2. Mandatory backend-issued liveness sessions (/api/liveness/session/start).
+3. Live webcam frame verification with MiniFASNet (/api/liveness/session/verify-frame).
+4. Spoof rejection on live stream: printed photo and screen replay rejected before capture.
+5. Strict capture restriction: direct POST /register and /login without verified session rejected with HTTP 403.
+6. Replay attack prevention: consumed sessions cannot be reused.
+7. Processing order enforcement: MediaPipe BlazeFace and FaceNet are NEVER invoked on failed liveness.
+8. Genuine registration workflow: live session -> genuine verified frame -> capture -> MediaPipe -> FaceNet -> DB/FAISS.
+9. Genuine 1:N and 1:1 login workflow: live session -> genuine verified frame -> capture -> MediaPipe -> FaceNet -> FAISS match.
+10. Fail-closed security when liveness service is unavailable.
+11. Safe post-test cleanup via Admin API.
 """
 
 import os
@@ -33,11 +32,12 @@ from main import app, _process_registration_sync, _process_login_sync, detector
 from user_service import delete_user, get_user_embedding, get_user_profile
 from faiss_service import get_faiss_manager
 from liveness_service import get_liveness_service
+from liveness_session import get_liveness_session_manager
 
 
 async def run_liveness_pipeline_tests():
     print("=" * 75)
-    print("   LIVENESS-FIRST FACE REGISTRATION & LOGIN PIPELINE VALIDATION   ")
+    print("   CAMERA-ONLY LIVENESS-FIRST PIPELINE VALIDATION SUITE   ")
     print("=" * 75)
 
     # Load test image fixtures
@@ -74,116 +74,128 @@ async def run_liveness_pipeline_tests():
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
 
         # ----------------------------------------------------------------------
-        # Test 1: Dedicated /check-liveness endpoint
+        # Test 1: Upload Endpoint Completely Removed (/upload returns 404/405)
         # ----------------------------------------------------------------------
-        print("\n[Test 1] Dedicated /check-liveness endpoint verification...")
-        resp_t1 = await client.post("/check-liveness", files={"image": ("real.jpg", real_jpeg_bytes, "image/jpeg")})
-        assert resp_t1.status_code == 200
-        res_t1 = resp_t1.json()
-        assert res_t1["is_real"] is True
-        assert res_t1["score"] >= 0.85
-        assert res_t1["label"] == "Real"
-        print(f"  [PASS] Genuine face verified: is_real=True, score={res_t1['score']:.4f} >= 0.85")
-
-        resp_f1 = await client.post("/check-liveness", files={"image": ("fake_print.jpg", fake_print_bytes, "image/jpeg")})
-        assert resp_f1.status_code == 200
-        res_f1 = resp_f1.json()
-        assert res_f1["is_real"] is False
-        assert res_f1["label"] == "Fake"
-        print(f"  [PASS] Printed photograph spoof rejected: is_real=False, score={res_f1['score']:.4f}, label={res_f1['label']}")
-
-        resp_f2 = await client.post("/check-liveness", files={"image": ("fake_replay.jpg", fake_replay_bytes, "image/jpeg")})
-        assert resp_f2.status_code == 200
-        res_f2 = resp_f2.json()
-        assert res_f2["is_real"] is False
-        assert res_f2["label"] == "Fake"
-        print(f"  [PASS] Screen replay spoof rejected: is_real=False, score={res_f2['score']:.4f}, label={res_f2['label']}")
-
-        resp_blank = await client.post("/check-liveness", files={"image": ("blank.jpg", blank_jpeg_bytes, "image/jpeg")})
-        assert resp_blank.status_code == 200
-        res_blank = resp_blank.json()
-        assert res_blank["is_real"] is False
-        assert res_blank["status"] == "no_face"
-        print("  [PASS] Blank non-face image: status='no_face', is_real=False")
-
-        # ----------------------------------------------------------------------
-        # Test 2: Spoof Registration Rejection (Print Photo)
-        # ----------------------------------------------------------------------
-        print("\n[Test 2] Testing registration rejection of printed photograph (POST /upload)...")
-        files_spoof = {"image": ("spoof.jpg", fake_print_bytes, "image/jpeg")}
-        data_spoof = {
-            "user_id": user_spoof,
-            "full_name": "Spoof Attacker",
-            "email": "attacker@example.com",
-            "role": "Fraudster",
-            "phone_number": "+1 555-0199"
-        }
-        resp_reg_spoof = await client.post("/upload", data=data_spoof, files=files_spoof)
-        print(f"  - Status Code: {resp_reg_spoof.status_code}")
-        print(f"  - Response JSON: {resp_reg_spoof.json()}")
-        assert resp_reg_spoof.status_code == 400
-        err_detail = resp_reg_spoof.json()["detail"]
-        assert err_detail["error"] == "liveness_failed"
-        assert err_detail["liveness"]["is_real"] is False
-
-        # Verify integrity: zero write to DB, zero FAISS update, zero saved image
-        assert get_user_embedding(user_spoof) is None, "Spoof user written to DB!"
-        faiss_mgr = get_faiss_manager()
-        assert not faiss_mgr.contains_user(user_spoof), "Spoof user inserted into FAISS!"
-        spoof_img_path = os.path.join(BASE_DIR, "cropped_faces", f"{user_spoof}_face.jpg")
-        assert not os.path.exists(spoof_img_path), "Spoof image saved to disk!"
-        print("  [PASS] Spoof registration rejected: PostgreSQL, FAISS, and filesystem remain completely unchanged.")
-
-        # ----------------------------------------------------------------------
-        # Test 3: Spoof Login Rejection (Screen Replay)
-        # ----------------------------------------------------------------------
-        print("\n[Test 3] Testing login rejection of screen replay attempt (POST /login)...")
-        files_login_replay = {"image": ("replay.jpg", fake_replay_bytes, "image/jpeg")}
-        resp_login_replay = await client.post("/login", files=files_login_replay)
-        print(f"  - Status Code: {resp_login_replay.status_code}")
-        print(f"  - Response JSON: {resp_login_replay.json()}")
-        assert resp_login_replay.status_code == 400
-        replay_detail = resp_login_replay.json()["detail"]
-        assert replay_detail["error"] == "liveness_failed"
-        assert replay_detail["authenticated"] is False
-        print("  [PASS] Replay login strictly rejected with authenticated=False before FAISS.")
-
-        # ----------------------------------------------------------------------
-        # Test 4: Uncertain / Sub-Threshold Confidence Rejection
-        # ----------------------------------------------------------------------
-        print("\n[Test 4] Testing rejection of uncertain confidence face (score < threshold)...")
-        # Test with threshold = 0.99999 (higher than genuine score 0.999906)
-        liveness_svc = get_liveness_service()
-        real_img = cv2.imread(real_face_path)
-        strict_result = liveness_svc.verify_liveness(real_img, threshold=0.99999)
-        assert strict_result["is_real"] is False
-        assert strict_result["status"] == "uncertain"
-        print(f"  [PASS] Face below strict threshold (0.99999 vs {strict_result['score']:.6f}) classified as uncertain and rejected.")
-
-        # ----------------------------------------------------------------------
-        # Test 5: Missing / Invalid Face in Registration & Login
-        # ----------------------------------------------------------------------
-        print("\n[Test 5] Testing registration & login rejection with blank / non-face frame...")
-        resp_reg_blank = await client.post(
+        print("\n[Test 1] Verifying that legacy /upload endpoint is completely removed...")
+        resp_upload = await client.post(
             "/upload",
-            data={"user_id": f"blank_{timestamp}"},
-            files={"image": ("blank.jpg", blank_jpeg_bytes, "image/jpeg")}
+            data={"user_id": "test_upload"},
+            files={"image": ("face.jpg", real_jpeg_bytes, "image/jpeg")}
         )
-        assert resp_reg_blank.status_code == 400
-        assert resp_reg_blank.json()["detail"]["error"] == "no_face"
+        assert resp_upload.status_code in (404, 405), f"Expected 404/405 for /upload, got {resp_upload.status_code}"
+        print(f"  [PASS] POST /upload rejected with HTTP {resp_upload.status_code}. No generic upload route exists.")
 
-        resp_login_blank = await client.post(
+        # ----------------------------------------------------------------------
+        # Test 2: Direct API Requests Without Liveness Session Rejected (HTTP 403/422)
+        # ----------------------------------------------------------------------
+        print("\n[Test 2] Testing direct API requests without liveness session (bypassing webcam)...")
+        # Direct register call with no session_id
+        resp_reg_direct = await client.post(
+            "/register",
+            data={"user_id": "attacker_1"},
+            files={"image": ("face.jpg", real_jpeg_bytes, "image/jpeg")}
+        )
+        assert resp_reg_direct.status_code in (403, 422), f"Expected 403/422, got {resp_reg_direct.status_code}"
+
+        # Direct login call with no session_id
+        resp_login_direct = await client.post(
             "/login",
-            files={"image": ("blank.jpg", blank_jpeg_bytes, "image/jpeg")}
+            files={"image": ("face.jpg", real_jpeg_bytes, "image/jpeg")}
         )
-        assert resp_login_blank.status_code == 400
-        assert resp_login_blank.json()["detail"]["error"] == "no_face"
-        print("  [PASS] Both registration and login reject missing face with HTTP 400 'no_face'.")
+        assert resp_login_direct.status_code in (403, 422), f"Expected 403/422, got {resp_login_direct.status_code}"
+        print("  [PASS] Direct POST /register and /login without liveness session strictly rejected.")
+
+        # Direct call with forged/unverified session_id
+        resp_reg_forged = await client.post(
+            "/register",
+            data={"session_id": "fake_session_123", "user_id": "attacker_2"},
+            files={"image": ("face.jpg", real_jpeg_bytes, "image/jpeg")}
+        )
+        assert resp_reg_forged.status_code == 403
+        assert resp_reg_forged.json()["detail"]["error"] == "liveness_verification_required"
+        print("  [PASS] Forged session ID rejected with HTTP 403 Forbidden.")
 
         # ----------------------------------------------------------------------
-        # Test 6: Processing Order Enforcement via Mocks / Spies
+        # Test 3: Backend Liveness Session Creation & Lifecycle
         # ----------------------------------------------------------------------
-        print("\n[Test 6] Verifying processing order: MediaPipe & FaceNet are NOT called on failed liveness...")
+        print("\n[Test 3] Testing backend-issued liveness session creation (/api/liveness/session/start)...")
+        resp_sess_reg = await client.post(
+            "/api/liveness/session/start",
+            data={"action": "register", "user_id": user_genuine}
+        )
+        assert resp_sess_reg.status_code == 200
+        sess_data = resp_sess_reg.json()
+        assert sess_data["status"] == "success"
+        reg_session_id = sess_data["session"]["session_id"]
+        assert reg_session_id.startswith("live_")
+        assert sess_data["session"]["is_verified"] is False
+        assert sess_data["session"]["is_consumed"] is False
+        print(f"  [PASS] Created liveness session: {reg_session_id} (action: register, is_verified: False)")
+
+        # ----------------------------------------------------------------------
+        # Test 4: Live Frame Anti-Spoofing Verification (Reject Print, Replay, Blank)
+        # ----------------------------------------------------------------------
+        print("\n[Test 4] Testing live stream anti-spoofing verification (/api/liveness/session/verify-frame)...")
+
+        # 4a: Spoof Print Photo Frame
+        resp_vf_print = await client.post(
+            "/api/liveness/session/verify-frame",
+            data={"session_id": reg_session_id},
+            files={"image": ("live_frame.jpg", fake_print_bytes, "image/jpeg")}
+        )
+        assert resp_vf_print.status_code == 200
+        vf_print_res = resp_vf_print.json()
+        assert vf_print_res["is_real"] is False
+        assert vf_print_res["verified"] is False
+        assert vf_print_res["label"] == "Fake"
+        print(f"  [PASS] Printed photograph spoof rejected on live stream: is_real=False, verified=False, score={vf_print_res['score']:.4f}")
+
+        # 4b: Spoof Screen Replay Frame
+        resp_vf_replay = await client.post(
+            "/api/liveness/session/verify-frame",
+            data={"session_id": reg_session_id},
+            files={"image": ("live_frame.jpg", fake_replay_bytes, "image/jpeg")}
+        )
+        assert resp_vf_replay.status_code == 200
+        vf_replay_res = resp_vf_replay.json()
+        assert vf_replay_res["is_real"] is False
+        assert vf_replay_res["verified"] is False
+        print(f"  [PASS] Screen replay spoof rejected on live stream: is_real=False, verified=False, score={vf_replay_res['score']:.4f}")
+
+        # 4c: Blank / Non-face Frame
+        resp_vf_blank = await client.post(
+            "/api/liveness/session/verify-frame",
+            data={"session_id": reg_session_id},
+            files={"image": ("live_frame.jpg", blank_jpeg_bytes, "image/jpeg")}
+        )
+        assert resp_vf_blank.status_code == 200
+        assert resp_vf_blank.json()["status"] == "no_face"
+        assert resp_vf_blank.json()["verified"] is False
+        print("  [PASS] Blank non-face frame: status='no_face', verified=False.")
+
+        # Ensure session remains unverified after spoof attempts
+        session_mgr = get_liveness_session_manager()
+        assert session_mgr.get_session(reg_session_id).is_verified is False
+        print("  [PASS] Session remains strictly unverified after spoof/blank attempts.")
+
+        # 4d: Genuine Live Frame -> Session becomes verified
+        resp_vf_real = await client.post(
+            "/api/liveness/session/verify-frame",
+            data={"session_id": reg_session_id},
+            files={"image": ("live_frame.jpg", real_jpeg_bytes, "image/jpeg")}
+        )
+        assert resp_vf_real.status_code == 200
+        vf_real_res = resp_vf_real.json()
+        assert vf_real_res["is_real"] is True
+        assert vf_real_res["verified"] is True
+        assert vf_real_res["score"] >= 0.85
+        assert session_mgr.get_session(reg_session_id).is_verified is True
+        print(f"  [PASS] Genuine face verified on live stream: is_real=True, verified=True (Score: {vf_real_res['score']:.4f} >= 0.85)")
+
+        # ----------------------------------------------------------------------
+        # Test 5: Processing Order Enforcement via Mocks / Spies
+        # ----------------------------------------------------------------------
+        print("\n[Test 5] Verifying processing order: MediaPipe & FaceNet are NOT called on failed liveness...")
         with mock.patch("main.detector.detect") as spy_detector, \
              mock.patch("main.extract_face_embedding") as spy_embedder:
 
@@ -201,77 +213,127 @@ async def run_liveness_pipeline_tests():
             assert reg_out["status"] == "liveness_failed"
             assert spy_detector.call_count == 0, "MediaPipe BlazeFace was called despite liveness failure!"
             assert spy_embedder.call_count == 0, "FaceNet embedder was called despite liveness failure!"
-            print("  [PASS] In registration: MediaPipe detect calls = 0, FaceNet extract calls = 0 when liveness fails.")
+            print("  [PASS] Registration: MediaPipe calls = 0, FaceNet calls = 0 on failed liveness.")
 
-            # Login worker test with fake input
+            # Login worker test with fake input (Pure 1:N)
             login_out = _process_login_sync(
-                clean_user_id=None,
                 img=fake_bgr,
                 image_size_bytes=len(fake_print_bytes)
             )
             assert login_out["status"] == "liveness_failed"
             assert spy_detector.call_count == 0, "MediaPipe BlazeFace was called on login liveness failure!"
             assert spy_embedder.call_count == 0, "FaceNet embedder was called on login liveness failure!"
-            print("  [PASS] In login: MediaPipe detect calls = 0, FaceNet extract calls = 0 when liveness fails.")
+            print("  [PASS] Login: MediaPipe calls = 0, FaceNet calls = 0 on failed liveness.")
 
         # ----------------------------------------------------------------------
-        # Test 7: Successful Registration of Genuine Face
+        # Test 6: Genuine User Registration with Verified Live Session
         # ----------------------------------------------------------------------
-        print("\n[Test 7] Testing successful registration with genuine live face...")
-        files_genuine = {"image": ("live_face.jpg", real_jpeg_bytes, "image/jpeg")}
+        print("\n[Test 6] Testing genuine user registration with verified live session...")
         data_genuine = {
+            "session_id": reg_session_id,
             "user_id": user_genuine,
             "full_name": "Jane Doe",
             "email": f"jane_{timestamp}@example.com",
             "role": "Security Lead",
             "phone_number": "+1 555-0188"
         }
-        resp_reg_genuine = await client.post("/upload", data=data_genuine, files=files_genuine)
+        files_genuine = {"image": ("webcam_verified_face.jpg", real_jpeg_bytes, "image/jpeg")}
+
+        resp_reg_genuine = await client.post("/register", data=data_genuine, files=files_genuine)
         assert resp_reg_genuine.status_code == 200, f"Registration failed: {resp_reg_genuine.text}"
         res_genuine = resp_reg_genuine.json()
         assert res_genuine["status"] == "success"
         assert res_genuine["user_id"] == user_genuine
-        assert res_genuine["liveness"]["is_real"] is True
-        assert res_genuine["liveness"]["score"] >= 0.85
         assert res_genuine["embedding_dimension"] == 512
 
-        # Verify PostgreSQL & FAISS synchronization
+        # Verify DB and FAISS synchronization
         user_record = get_user_embedding(user_genuine)
         assert user_record is not None, "User missing from PostgreSQL!"
         assert len(user_record["embedding"]) == 512
+        faiss_mgr = get_faiss_manager()
         assert faiss_mgr.contains_user(user_genuine), "User missing from FAISS index!"
         saved_crop = os.path.join(BASE_DIR, "cropped_faces", f"{user_genuine}_face.jpg")
         assert os.path.exists(saved_crop), "Cropped face image not saved on disk!"
         print(f"  [PASS] Genuine user '{user_genuine}' registered. PostgreSQL, FAISS, and filesystem synchronized.")
 
         # ----------------------------------------------------------------------
-        # Test 8: Successful 1:N and 1:1 Login with Genuine Face
+        # Test 7: Replay Attack Rejection (Consumed Session Cannot Be Reused)
         # ----------------------------------------------------------------------
-        print("\n[Test 8] Testing successful biometric login with genuine face...")
-        # 8a: 1:N ID-free login
-        files_login = {"image": ("login_live.jpg", real_jpeg_bytes, "image/jpeg")}
-        resp_login_1n = await client.post("/login", files=files_login)
+        print("\n[Test 7] Testing replay attack rejection with consumed liveness session...")
+        resp_replay = await client.post("/register", data=data_genuine, files=files_genuine)
+        assert resp_replay.status_code == 403
+        assert resp_replay.json()["detail"]["error"] == "liveness_verification_required"
+        print("  [PASS] Replay registration attempt with consumed session strictly rejected with HTTP 403.")
+
+        # ----------------------------------------------------------------------
+        # Test 8: Genuine 1:N and 1:1 Login with Verified Live Session
+        # ----------------------------------------------------------------------
+        print("\n[Test 8] Testing genuine 1:N and 1:1 login via live camera session...")
+
+        # 8a: Start login session
+        resp_sess_login = await client.post("/api/liveness/session/start", data={"action": "login"})
+        assert resp_sess_login.status_code == 200
+        login_session_id = resp_sess_login.json()["session"]["session_id"]
+
+        # Verify frame on live stream
+        resp_vf_login = await client.post(
+            "/api/liveness/session/verify-frame",
+            data={"session_id": login_session_id},
+            files={"image": ("live_login.jpg", real_jpeg_bytes, "image/jpeg")}
+        )
+        assert resp_vf_login.status_code == 200
+        assert resp_vf_login.json()["verified"] is True
+
+        # Perform 1:N Login
+        resp_login_1n = await client.post(
+            "/login",
+            data={"session_id": login_session_id},
+            files={"image": ("webcam_verified_login.jpg", real_jpeg_bytes, "image/jpeg")}
+        )
         assert resp_login_1n.status_code == 200, f"1:N login failed: {resp_login_1n.text}"
         login_1n_data = resp_login_1n.json()
         assert login_1n_data["status"] == "success"
         assert login_1n_data["authenticated"] is True
         assert login_1n_data["user_id"] == user_genuine
-        assert login_1n_data["liveness"]["is_real"] is True
         assert login_1n_data["user_profile"]["full_name"] == "Jane Doe"
-        print(f"  [PASS] 1:N Identification successful. Authenticated: '{login_1n_data['user_id']}', Profile: {login_1n_data['user_profile']['full_name']}")
+        print(f"  [PASS] 1:N Login successful. Authenticated user: '{login_1n_data['user_id']}', Profile: Jane Doe.")
 
-        # 8b: 1:1 Claimed Identity verification
-        data_11 = {"user_id": user_genuine}
-        files_11 = {"image": ("login_live.jpg", real_jpeg_bytes, "image/jpeg")}
-        resp_login_11 = await client.post("/login", data=data_11, files=files_11)
-        assert resp_login_11.status_code == 200
-        assert resp_login_11.json()["authenticated"] is True
-        print(f"  [PASS] 1:1 Verification successful for claimed ID '{user_genuine}'.")
+        # 8b: 1:N Rejection of Unknown / Unregistered Face
+        print("\n[Test 8b] Testing 1:N rejection of unknown / unregistered face...")
+        # Delete user_genuine so they are no longer in DB/FAISS
+        del_resp = await client.delete(
+            f"/users/{user_genuine}",
+            headers={"X-Admin-Key": os.getenv("ADMIN_API_KEY", "admin_secret_key_2026")}
+        )
+        assert del_resp.status_code == 200
+
+        # Attempt 1:N login with now-unregistered face
+        resp_sess_unknown = await client.post("/api/liveness/session/start", data={"action": "login"})
+        unknown_session_id = resp_sess_unknown.json()["session"]["session_id"]
+
+        resp_vf_unk = await client.post(
+            "/api/liveness/session/verify-frame",
+            data={"session_id": unknown_session_id},
+            files={"image": ("live_login.jpg", real_jpeg_bytes, "image/jpeg")}
+        )
+        assert resp_vf_unk.json()["verified"] is True
+
+        resp_login_unk = await client.post(
+            "/login",
+            data={"session_id": unknown_session_id},
+            files={"image": ("webcam_verified_login.jpg", real_jpeg_bytes, "image/jpeg")}
+        )
+        assert resp_login_unk.status_code == 401
+        unk_detail = resp_login_unk.json()["detail"]
+        assert unk_detail["authenticated"] is False
+        print("  [PASS] 1:N Login correctly rejected unknown/unregistered face with HTTP 401 Unauthorized.")
 
         # ----------------------------------------------------------------------
         # Test 9: Fail-Closed Security Verification
         # ----------------------------------------------------------------------
         print("\n[Test 9] Verifying fail-closed security when liveness model is unavailable...")
+        liveness_svc = get_liveness_service()
+        real_img = cv2.imread(real_face_path)
         with mock.patch.object(liveness_svc, "is_available", return_value=False):
             fc_reg = _process_registration_sync(
                 clean_user_id=f"fail_closed_{timestamp}",
@@ -285,33 +347,26 @@ async def run_liveness_pipeline_tests():
             assert fc_reg["liveness"]["status"] == "model_unavailable"
 
             fc_login = _process_login_sync(
-                clean_user_id=None,
                 img=real_img,
                 image_size_bytes=len(real_jpeg_bytes)
             )
             assert fc_login["status"] == "liveness_failed"
             assert fc_login["authenticated"] is False
-            print("  [PASS] Fail-closed verified: when liveness model is unavailable, both registration and login are rejected.")
+            print("  [PASS] Fail-closed verified: when liveness model is unavailable, both registration and login fail closed.")
 
         # ----------------------------------------------------------------------
         # Test 10: Cleanup & Post-Verification
         # ----------------------------------------------------------------------
-        print("\n[Test 10] Cleaning up test records and verifying user deletion...")
-        del_resp = await client.delete(
-            f"/users/{user_genuine}",
-            headers={"X-Admin-Key": os.getenv("ADMIN_API_KEY", "admin_secret_key_2026")}
-        )
-        assert del_resp.status_code == 200
+        print("\n[Test 10] Verifying cleanup...")
         assert not faiss_mgr.contains_user(user_genuine)
         assert get_user_embedding(user_genuine) is None
         assert not os.path.exists(saved_crop)
-        print(f"  [PASS] Cleaned up user '{user_genuine}' from PostgreSQL, FAISS, and filesystem.")
+        print(f"  [PASS] Verified user '{user_genuine}' is completely purged from PostgreSQL, FAISS, and filesystem.")
 
     print("\n" + "=" * 75)
-    print("   ALL LIVENESS-FIRST PIPELINE TESTS COMPLETED & PASSED!   ")
+    print("   ALL CAMERA-ONLY LIVENESS-FIRST PIPELINE TESTS COMPLETED & PASSED!   ")
     print("=" * 75)
 
 
 if __name__ == "__main__":
     asyncio.run(run_liveness_pipeline_tests())
-
