@@ -1,13 +1,14 @@
 import { useState, useRef, useEffect } from "react";
+import "./Registration.css";
 
 const REGISTRATION_STAGES = [
-  { id: 1, label: "Initializing Camera" },
-  { id: 2, label: "Checking Face Liveness" },
-  { id: 3, label: "Real Face Verified" },
-  { id: 4, label: "Detecting Face with MediaPipe" },
-  { id: 5, label: "Generating Face Embedding" },
-  { id: 6, label: "Processing Registration" },
-  { id: 7, label: "Registration Status" },
+  { id: 1, label: "Initializing Camera & Sensor" },
+  { id: 2, label: "Anti-Spoofing Liveness Evaluation" },
+  { id: 3, label: "Biometric Authenticity Confirmed" },
+  { id: 4, label: "MediaPipe BlazeFace Landmark Alignment" },
+  { id: 5, label: "FaceNet 512-D Embedding Extraction" },
+  { id: 6, label: "PostgreSQL & FAISS Vector Commitment" },
+  { id: 7, label: "Identity Enrollment Complete" },
 ];
 
 function Registration() {
@@ -97,7 +98,7 @@ function Registration() {
 
     // Step 1: Initializing Camera
     setCurrentStage(1);
-    setMessage("Step 1/7: Initializing Camera & requesting webcam access...");
+    setMessage("Step 1/7: Initializing Camera & requesting secure video stream...");
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setStatusType("error");
@@ -139,7 +140,7 @@ function Registration() {
         videoRef.current.srcObject = stream;
       }
       setCameraOn(true);
-      setMessage("Camera active. Please center your face directly in the frame...");
+      setMessage("Camera active. Please center your face directly within the reticle...");
 
       // Wait for camera video feed to be ready and playing
       const video = videoRef.current;
@@ -185,7 +186,7 @@ function Registration() {
 
       // Step 2: Checking Face Liveness on active live webcam frames
       setCurrentStage(2);
-      setMessage("Step 2/7: Checking Face Liveness with MiniFASNet anti-spoofing model...");
+      setMessage("Step 2/7: Checking Face Liveness with MiniFASNet anti-spoofing engine...");
 
       let isVerified = false;
       let verifiedResult = null;
@@ -215,7 +216,7 @@ function Registration() {
         const verifyResult = await verifyResp.json();
 
         if (verifyResult.status === "no_face") {
-          setMessage(`Step 2/7: No face detected (${attempt}/${maxLivenessAttempts}). Please center your face in the camera frame.`);
+          setMessage(`Step 2/7: Position face in reticle (${attempt}/${maxLivenessAttempts}). Searching for subject...`);
           await delay(350);
           continue;
         }
@@ -224,7 +225,7 @@ function Registration() {
           // Liveness detection failed: reject attempt immediately. Do NOT capture or register face image.
           setStatusType("error");
           setCurrentStage(2);
-          setMessage("Liveness check failed: Spoof or fake face detected. Please face the camera and try again.");
+          setMessage("Liveness verification rejected: Synthetic or replay artifact detected. Please face the camera directly.");
           setLivenessData(verifyResult);
           return;
         }
@@ -235,25 +236,21 @@ function Registration() {
           break;
         }
 
-        setMessage(`Step 2/7: Analyzing live face (${attempt}/${maxLivenessAttempts}). Please look at the camera...`);
+        setMessage(`Step 2/7: Analyzing live face stability (${attempt}/${maxLivenessAttempts}). Look directly at camera...`);
         await delay(300);
       }
 
       if (!isVerified) {
         setStatusType("error");
         setCurrentStage(2);
-        setMessage("Liveness verification timed out without confirming a real, live face. Registration rejected.");
+        setMessage("Liveness verification timed out without confirming a live person. Registration rejected.");
         return;
       }
 
-      // Step 3: Real Face Verified
+      // Step 3: Real Face Verified (No score percentage leaked)
       setLivenessData(verifiedResult);
-      const confScore = verifiedResult.score
-        ? (verifiedResult.score * 100).toFixed(1)
-        : "99.9";
-
       setCurrentStage(3);
-      setMessage(`Step 3/7: Real Face Verified! (MiniFASNet Confidence: ${confScore}%)`);
+      setMessage("Step 3/7: Real Face Verified! Biometric authenticity confirmed.");
       await delay(350);
 
       // Step 4: ONLY after successful liveness verification, capture face from active webcam
@@ -267,7 +264,7 @@ function Registration() {
       }
 
       setCurrentStage(4);
-      setMessage("Step 4/7: Detecting Face & Cropping with MediaPipe BlazeFace...");
+      setMessage("Step 4/7: Detecting facial landmarks with MediaPipe BlazeFace...");
 
       // Send to /register with verified session_id
       const regFormData = new FormData();
@@ -300,34 +297,34 @@ function Registration() {
 
       // Step 5: Generating Face Embedding
       setCurrentStage(5);
-      setMessage("Step 5/7: Generating 512-D FaceNet Biometric Embedding...");
+      setMessage("Step 5/7: Extracting 512-D L2-normalized FaceNet biometric vector...");
       await delay(350);
 
       // Step 6: Processing Registration
       setCurrentStage(6);
-      setMessage("Step 6/7: Storing Profile in PostgreSQL & Synchronizing FAISS Index...");
+      setMessage("Step 6/7: Storing profile record in PostgreSQL & synchronizing FAISS IndexFlatIP...");
       await delay(350);
 
       // Step 7: Completed
       setCurrentStage(7);
       setStatusType("success");
-      setMessage(regResult.message || `User '${cleanFullName} (${cleanId})' registered successfully!`);
+      setMessage(regResult.message || `Identity verified and enrolled: ${cleanFullName} (${cleanId}).`);
     } catch (err) {
       setStatusType("error");
       if (currentStage < 2) setCurrentStage(1);
 
       if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
-        setMessage("Camera permission was denied. Please allow camera permissions in your browser settings to proceed.");
+        setMessage("Camera permission was denied. Please allow camera permissions in your browser to proceed.");
       } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
-        setMessage("No camera device was found on this system.");
+        setMessage("No video capture hardware detected on this workstation.");
       } else if (err.name === "NotReadableError" || err.name === "TrackStartError") {
-        setMessage("Camera is already in use by another application or unavailable.");
+        setMessage("Camera device is locked by another process or unavailable.");
       } else if (err.name === "OverconstrainedError") {
-        setMessage("Camera does not support the requested video constraints.");
+        setMessage("Camera hardware cannot support the requested video resolution.");
       } else if (err.message && err.message.includes("fetch")) {
-        setMessage("Failed to connect to backend server. Please verify FastAPI backend is running.");
+        setMessage("Backend connection refused. Ensure the OJIX FastAPI server is active.");
       } else {
-        setMessage(err.message || "An unexpected error occurred during registration.");
+        setMessage(err.message || "An unexpected error occurred during biometric registration.");
       }
     } finally {
       stopCamera();
@@ -336,303 +333,256 @@ function Registration() {
     }
   };
 
-  const getStatusColor = () => {
-    if (statusType === "error") return "#dc2626";
-    if (statusType === "success") return "#16a34a";
-    if (statusType === "loading") return "#2563eb";
-    return "#333";
+  // Viewfinder dynamic status indicator
+  const getViewfinderStatus = () => {
+    if (!cameraOn) {
+      return { text: "Sensor Idle", dotClass: "status-dot" };
+    }
+    if (currentStage === 3 || statusType === "success") {
+      return { text: "Subject Verified", dotClass: "status-dot status-dot-verified" };
+    }
+    if (statusType === "error") {
+      return { text: "Verification Rejected", dotClass: "status-dot status-dot-denied" };
+    }
+    if (currentStage >= 1 && currentStage < 3) {
+      return { text: "Liveness Engine Active", dotClass: "status-dot status-dot-scanning" };
+    }
+    return { text: "Live Video Feed", dotClass: "status-dot status-dot-cyan" };
   };
 
-  const inputStyle = {
-    padding: "9px 12px",
-    fontSize: "14px",
-    borderRadius: "6px",
-    border: "1px solid #d1d5db",
-    width: "100%",
-    boxSizing: "border-box"
-  };
-
-  const labelStyle = {
-    display: "block",
-    textAlign: "left",
-    fontSize: "13px",
-    fontWeight: "600",
-    color: "#374151",
-    marginBottom: "4px"
-  };
+  const vStatus = getViewfinderStatus();
 
   return (
-    <div style={{ textAlign: "center", padding: "10px 20px" }}>
-      <h2 style={{ marginBottom: "6px" }}>User Profile & Live Camera Face Registration</h2>
-      <p style={{ color: "#666", marginBottom: "20px", fontSize: "14px" }}>
-        Fill out your profile details and click Register. Liveness verification occurs via live camera before any face is captured or registered.
-      </p>
-
-      {/* Profile Form Fields Grid */}
-      <div
-        style={{
-          maxWidth: "460px",
-          margin: "0 auto 20px auto",
-          display: "grid",
-          gridTemplateColumns: "1fr",
-          gap: "12px",
-          textAlign: "left"
-        }}
-      >
-        <div>
-          <label style={labelStyle}>User ID *</label>
-          <input
-            type="text"
-            placeholder="e.g. john_doe"
-            value={userId}
-            onChange={(e) => setUserId(e.target.value)}
-            disabled={isLoading}
-            style={inputStyle}
-          />
-        </div>
-
-        <div>
-          <label style={labelStyle}>Full Name *</label>
-          <input
-            type="text"
-            placeholder="e.g. John Doe"
-            value={fullName}
-            onChange={(e) => setFullName(e.target.value)}
-            disabled={isLoading}
-            style={inputStyle}
-          />
-        </div>
-
-        <div>
-          <label style={labelStyle}>Work Email *</label>
-          <input
-            type="email"
-            placeholder="e.g. john.doe@company.com"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            disabled={isLoading}
-            style={inputStyle}
-          />
-        </div>
-
-        <div>
-          <label style={labelStyle}>Role / Designation *</label>
-          <input
-            type="text"
-            placeholder="e.g. Senior Software Engineer"
-            value={role}
-            onChange={(e) => setRole(e.target.value)}
-            disabled={isLoading}
-            style={inputStyle}
-          />
-        </div>
-
-        <div>
-          <label style={labelStyle}>Phone Number *</label>
-          <input
-            type="tel"
-            placeholder="e.g. +1 555-0123"
-            value={phoneNumber}
-            onChange={(e) => setPhoneNumber(e.target.value)}
-            disabled={isLoading}
-            style={inputStyle}
-          />
-        </div>
+    <div className="registration-container">
+      {/* Header Description */}
+      <div className="registration-header">
+        <h2>
+          <span>Biometric Identity Registration</span>
+          <span className="badge badge-cyber badge-mono">ENROLLMENT PORTAL</span>
+        </h2>
+        <p>
+          Complete user credentials and initiate live biometric verification. Liveness detection is enforced prior to embedding extraction.
+        </p>
       </div>
 
-      {/* Live Video Viewport (No Upload Option) */}
-      <div>
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
-          width="380"
-          style={{
-            background: "#222",
-            borderRadius: "8px",
-            boxShadow: "0 4px 10px rgba(0,0,0,0.15)",
-            border: cameraOn ? "2px solid #16a34a" : "2px solid #555",
-            minHeight: "260px",
-            display: "inline-block"
-          }}
-        />
-      </div>
-
-      <br />
-
-      {/* Primary Action Button: Click to Register */}
-      <div style={{ display: "flex", gap: "10px", justifyContent: "center" }}>
-        <button
-          onClick={handleRegisterClick}
-          disabled={isLoading}
-          style={{
-            padding: "12px 32px",
-            fontSize: "16px",
-            cursor: isLoading ? "not-allowed" : "pointer",
-            borderRadius: "6px",
-            backgroundColor: isLoading ? "#9ca3af" : "#16a34a",
-            color: "#fff",
-            border: "none",
-            fontWeight: "bold",
-            boxShadow: "0 2px 8px rgba(22, 163, 74, 0.25)",
-            transition: "all 0.2s ease"
-          }}
-        >
-          {isLoading ? "Verifying Liveness & Registering..." : "Click to Register"}
-        </button>
-      </div>
-
-      {/* 7-Step Liveness-First Processing Pipeline Stepper */}
-      {currentStage > 0 && (
-        <div
-          style={{
-            maxWidth: "520px",
-            margin: "20px auto 10px auto",
-            padding: "14px 16px",
-            borderRadius: "8px",
-            background: "#f9fafb",
-            border: "1px solid #e5e7eb",
-            textAlign: "left"
-          }}
-        >
-          <div style={{ fontSize: "13px", fontWeight: "700", color: "#374151", marginBottom: "10px" }}>
-            Pipeline Progress (Live Camera Liveness-First Verification):
+      {/* Two-Column Responsive Grid */}
+      <div className="registration-grid">
+        {/* Left Column: Profile Form */}
+        <div className="reg-form-panel">
+          <div className="reg-form-title">
+            <span>Identity Credentials</span>
           </div>
 
-          <div style={{ display: "grid", gap: "6px" }}>
-            {REGISTRATION_STAGES.map((st) => {
-              const isPast = currentStage > st.id;
-              const isCurrent = currentStage === st.id;
-              const isFailedAtThisStep = isCurrent && statusType === "error";
+          <div className="reg-form-fields">
+            <div className="field-group">
+              <label className="cyber-label">
+                <span>User ID <span className="required-star">*</span></span>
+                <span className="field-hint">Unique alphanumeric</span>
+              </label>
+              <input
+                type="text"
+                className="cyber-input cyber-input-mono"
+                placeholder="e.g. john_doe"
+                value={userId}
+                onChange={(e) => setUserId(e.target.value)}
+                disabled={isLoading}
+                autoComplete="off"
+              />
+            </div>
 
-              let badgeBg = "#e5e7eb";
-              let badgeColor = "#6b7280";
-              let badgeText = `${st.id}`;
-              let rowColor = "#9ca3af";
+            <div className="field-group">
+              <label className="cyber-label">
+                <span>Full Name <span className="required-star">*</span></span>
+                <span className="field-hint">First and last name</span>
+              </label>
+              <input
+                type="text"
+                className="cyber-input"
+                placeholder="e.g. John Doe"
+                value={fullName}
+                onChange={(e) => setFullName(e.target.value)}
+                disabled={isLoading}
+              />
+            </div>
 
-              if (isPast || (isCurrent && statusType === "success")) {
-                badgeBg = "#16a34a";
-                badgeColor = "#ffffff";
-                badgeText = "✓";
-                rowColor = "#15803d";
-              } else if (isFailedAtThisStep) {
-                badgeBg = "#dc2626";
-                badgeColor = "#ffffff";
-                badgeText = "✗";
-                rowColor = "#b91c1c";
-              } else if (isCurrent) {
-                badgeBg = "#2563eb";
-                badgeColor = "#ffffff";
-                badgeText = "⏳";
-                rowColor = "#1d4ed8";
-              }
+            <div className="field-group">
+              <label className="cyber-label">
+                <span>Work Email <span className="required-star">*</span></span>
+                <span className="field-hint">Corporate domain</span>
+              </label>
+              <input
+                type="email"
+                className="cyber-input"
+                placeholder="e.g. john.doe@company.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                disabled={isLoading}
+              />
+            </div>
 
-              return (
-                <div
-                  key={st.id}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "10px",
-                    padding: "4px 8px",
-                    borderRadius: "6px",
-                    background: isCurrent ? "rgba(37, 99, 235, 0.06)" : "transparent"
-                  }}
-                >
-                  <span
-                    style={{
-                      display: "inline-flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      width: "22px",
-                      height: "22px",
-                      borderRadius: "50%",
-                      fontSize: "12px",
-                      fontWeight: "700",
-                      background: badgeBg,
-                      color: badgeColor,
-                      flexShrink: 0
-                    }}
-                  >
-                    {badgeText}
-                  </span>
-                  <span
-                    style={{
-                      fontSize: "13px",
-                      fontWeight: isCurrent ? "700" : "500",
-                      color: rowColor
-                    }}
-                  >
-                    {st.label}
-                  </span>
+            <div className="field-group">
+              <label className="cyber-label">
+                <span>Role / Designation <span className="required-star">*</span></span>
+                <span className="field-hint">Access tier</span>
+              </label>
+              <input
+                type="text"
+                className="cyber-input"
+                placeholder="e.g. Senior Security Architect"
+                value={role}
+                onChange={(e) => setRole(e.target.value)}
+                disabled={isLoading}
+              />
+            </div>
+
+            <div className="field-group">
+              <label className="cyber-label">
+                <span>Phone Number <span className="required-star">*</span></span>
+                <span className="field-hint">Direct contact</span>
+              </label>
+              <input
+                type="tel"
+                className="cyber-input cyber-input-mono"
+                placeholder="e.g. +1 555-0123"
+                value={phoneNumber}
+                onChange={(e) => setPhoneNumber(e.target.value)}
+                disabled={isLoading}
+              />
+            </div>
+          </div>
+
+          <button
+            onClick={handleRegisterClick}
+            disabled={isLoading}
+            className="btn btn-primary btn-register-submit"
+          >
+            {isLoading ? (
+              <>
+                <span className="status-dot status-dot-scanning"></span>
+                <span>Enrolling Biometric Profile...</span>
+              </>
+            ) : (
+              <span>Start Live Camera Enrollment</span>
+            )}
+          </button>
+        </div>
+
+        {/* Right Column: Viewfinder & Pipeline Stepper */}
+        <div className="reg-viewfinder-panel">
+          {/* Cyber Biometric Viewfinder */}
+          <div
+            className={`cyber-viewfinder ${cameraOn ? "camera-active" : ""} ${
+              currentStage === 3 || statusType === "success" ? "liveness-verified" : ""
+            } ${statusType === "error" ? "liveness-failed" : ""}`}
+          >
+            {/* Viewfinder Status Overlay */}
+            <div className="viewfinder-status-bar">
+              <span className={vStatus.dotClass}></span>
+              <span>{vStatus.text}</span>
+            </div>
+
+            {/* Corner Reticle Brackets */}
+            <div className="reticle-corner top-left"></div>
+            <div className="reticle-corner top-right"></div>
+            <div className="reticle-corner bottom-left"></div>
+            <div className="reticle-corner bottom-right"></div>
+
+            {/* Centered Face Alignment Target */}
+            <div className="face-alignment-oval">
+              <span>Align Face</span>
+            </div>
+
+            {/* Active Webcam Video Stream */}
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="cyber-video-stream"
+              style={{ display: cameraOn ? "block" : "none" }}
+            />
+
+            {/* Idle Placeholder when camera is inactive */}
+            {!cameraOn && (
+              <div className="viewfinder-idle-state">
+                <div className="viewfinder-idle-icon">📷</div>
+                <div className="viewfinder-idle-text">Optical Sensor Standby</div>
+                <div className="viewfinder-idle-subtext">
+                  Camera will activate automatically upon initiating enrollment.
                 </div>
-              );
-            })}
+              </div>
+            )}
           </div>
-        </div>
-      )}
 
-      {/* Live Status Feedback Message */}
-      {message && (
-        <div
-          style={{
-            maxWidth: "520px",
-            margin: "15px auto 0 auto",
-            padding: "12px 16px",
-            borderRadius: "6px",
-            background:
-              statusType === "error"
-                ? "#fef2f2"
-                : statusType === "success"
-                ? "#f0fdf4"
-                : "#eff6ff",
-            border: `1px solid ${
-              statusType === "error"
-                ? "#fecaca"
-                : statusType === "success"
-                ? "#bbf7d0"
-                : "#bfdbfe"
-            }`,
-            color: getStatusColor(),
-            fontSize: "14px",
-            fontWeight: "600",
-            textAlign: "left",
-            lineHeight: "1.4"
-          }}
-        >
-          {statusType === "loading" && <span style={{ marginRight: "8px" }}>🔄</span>}
-          {statusType === "error" && <span style={{ marginRight: "8px" }}>⚠️</span>}
-          {statusType === "success" && <span style={{ marginRight: "8px" }}>✅</span>}
-          {message}
-        </div>
-      )}
+          {/* 7-Stage Technical Pipeline Stepper */}
+          {currentStage > 0 && (
+            <div className="reg-stepper-panel">
+              <div className="stepper-header">
+                <span className="stepper-header-title">Enrollment Pipeline</span>
+                <span className="badge badge-cyber badge-mono">
+                  STAGE {currentStage} OF 7
+                </span>
+              </div>
 
-      {/* Liveness Diagnostic Details */}
-      {livenessData && (
-        <div
-          style={{
-            maxWidth: "520px",
-            margin: "10px auto 0 auto",
-            padding: "10px 14px",
-            borderRadius: "6px",
-            background: "#f9fafb",
-            border: "1px solid #e5e7eb",
-            fontSize: "12px",
-            color: "#4b5563",
-            textAlign: "left"
-          }}
-        >
-          <div>
-            <strong>MiniFASNet Confidence:</strong>{" "}
-            {livenessData.score ? `${(livenessData.score * 100).toFixed(2)}%` : "N/A"}{" "}
-            (Threshold: {livenessData.threshold ? `${(livenessData.threshold * 100).toFixed(0)}%` : "85%"})
-          </div>
-          <div>
-            <strong>Liveness Classification:</strong> {livenessData.label || livenessData.status}
-          </div>
+              <div className="stepper-step-list">
+                {REGISTRATION_STAGES.map((st) => {
+                  const isPast = currentStage > st.id;
+                  const isCurrent = currentStage === st.id;
+                  const isFailed = isCurrent && statusType === "error";
+
+                  let stateClass = "pending";
+                  let indicatorText = `${st.id}`;
+
+                  if (isPast || (isCurrent && statusType === "success")) {
+                    stateClass = "completed";
+                    indicatorText = "✓";
+                  } else if (isFailed) {
+                    stateClass = "failed";
+                    indicatorText = "✕";
+                  } else if (isCurrent) {
+                    stateClass = "active";
+                    indicatorText = "●";
+                  }
+
+                  return (
+                    <div key={st.id} className={`stepper-step-item ${stateClass}`}>
+                      <span className="step-indicator">{indicatorText}</span>
+                      <span className="step-label">{st.label}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Feedback & Alert Box */}
+          {message && (
+            <div
+              className={`cyber-feedback-box ${
+                statusType === "error"
+                  ? "error"
+                  : statusType === "success"
+                  ? "success"
+                  : "loading"
+              }`}
+            >
+              <div className="feedback-icon">
+                {statusType === "error" && "⚠️"}
+                {statusType === "success" && "✓"}
+                {statusType === "loading" && "●"}
+              </div>
+              <div className="feedback-content">
+                <div>{message}</div>
+                {livenessData && (
+                  <div className="feedback-meta">
+                    Liveness Engine: {livenessData.label || livenessData.status} (Verified)
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }

@@ -1,16 +1,21 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
+import "./UserManagement.css";
 
 function UserManagement() {
   const [users, setUsers] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [adminKey, setAdminKey] = useState("admin_secret_key_2026");
+  // Security requirement: Never prepopulate or expose admin secrets in source code
+  const [adminKey, setAdminKey] = useState("");
+  const [showAdminKey, setShowAdminKey] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
   const [feedback, setFeedback] = useState({ type: null, message: "" });
   const [confirmDialog, setConfirmDialog] = useState({ open: false, user: null });
 
   // Fetch all registered users from FastAPI backend
   const fetchUsers = async () => {
     setIsLoading(true);
+    setFeedback({ type: null, message: "" });
     try {
       const response = await fetch("http://127.0.0.1:8000/users");
       if (!response.ok) {
@@ -21,7 +26,7 @@ function UserManagement() {
     } catch (err) {
       setFeedback({
         type: "error",
-        message: `Failed to load users: ${err.message || "Connection refused"}`
+        message: `Failed to query PostgreSQL registry: ${err.message || "Connection refused"}`
       });
     } finally {
       setIsLoading(false);
@@ -50,6 +55,15 @@ function UserManagement() {
     const user = confirmDialog.user;
     if (!user) return;
 
+    if (!adminKey.trim()) {
+      setFeedback({
+        type: "error",
+        message: "Administrator authorization key is required to authorize biometric profile deletion."
+      });
+      setConfirmDialog({ open: false, user: null });
+      return;
+    }
+
     setIsDeleting(true);
     setFeedback({ type: null, message: "" });
 
@@ -66,7 +80,7 @@ function UserManagement() {
       if (response.ok) {
         setFeedback({
           type: "success",
-          message: data.message || `User '${user.user_id}' was deleted successfully.`
+          message: data.message || `User '${user.user_id}' was completely purged from PostgreSQL, FAISS, and filesystem.`
         });
         setConfirmDialog({ open: false, user: null });
         // Automatically refresh user list
@@ -75,7 +89,7 @@ function UserManagement() {
         const errorDetail = data.detail?.message || data.detail?.error || data.message || `HTTP ${response.status} Error`;
         setFeedback({
           type: "error",
-          message: `Deletion failed: ${errorDetail}`
+          message: `Deletion authorization failed: ${errorDetail}`
         });
         setConfirmDialog({ open: false, user: null });
       }
@@ -90,92 +104,109 @@ function UserManagement() {
     }
   };
 
+  // Filtered users calculation
+  const filteredUsers = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return users;
+    return users.filter((u) => {
+      const idMatch = (u.user_id || "").toLowerCase().includes(q);
+      const nameMatch = (u.full_name || "").toLowerCase().includes(q);
+      const emailMatch = (u.email || "").toLowerCase().includes(q);
+      const roleMatch = (u.role || "").toLowerCase().includes(q);
+      return idMatch || nameMatch || emailMatch || roleMatch;
+    });
+  }, [users, searchQuery]);
+
+  const totalSynced = useMemo(() => {
+    return users.filter((u) => u.has_embedding).length;
+  }, [users]);
+
   return (
-    <div style={{ padding: "10px" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "18px", flexWrap: "wrap", gap: "10px" }}>
-        <div>
-          <h2 style={{ margin: "0 0 4px 0", color: "#111827" }}>Registered Users</h2>
-          <p style={{ margin: 0, color: "#6b7280", fontSize: "14px" }}>
-            Manage biometric profiles, PostgreSQL records, and FAISS vector indices
+    <div className="user-mgmt-container">
+      {/* Header & Stat Summary */}
+      <div className="user-mgmt-header">
+        <div className="user-mgmt-title-group">
+          <h2>
+            <span>USER ACCESS MANAGEMENT</span>
+            <span className="badge badge-cyber badge-mono">REGISTRY CONSOLE</span>
+          </h2>
+          <p>
+            Audit and manage enrolled biometric profiles, PostgreSQL records, and FAISS vector indices.
           </p>
         </div>
-        <button
-          onClick={fetchUsers}
-          disabled={isLoading}
-          style={{
-            padding: "8px 16px",
-            background: "#f3f4f6",
-            border: "1px solid #d1d5db",
-            borderRadius: "6px",
-            cursor: isLoading ? "not-allowed" : "pointer",
-            fontWeight: "600",
-            fontSize: "14px",
-            color: "#374151",
-            display: "inline-flex",
-            alignItems: "center",
-            gap: "6px"
-          }}
-        >
-          🔄 {isLoading ? "Refreshing..." : "Refresh List"}
-        </button>
-      </div>
 
-      {/* Admin Key Configuration Bar */}
-      <div
-        style={{
-          background: "#f9fafb",
-          border: "1px solid #e5e7eb",
-          borderRadius: "8px",
-          padding: "12px 16px",
-          marginBottom: "18px",
-          display: "flex",
-          alignItems: "center",
-          gap: "12px",
-          flexWrap: "wrap"
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: "6px", color: "#374151", fontSize: "14px", fontWeight: "600" }}>
-          <span>🔑 Admin Key:</span>
+        <div className="user-mgmt-header-actions">
+          <div className="stat-chip">
+            <span>ENROLLED:</span>
+            <span className="stat-chip-count">{totalSynced} / {users.length}</span>
+          </div>
+
+          <button
+            onClick={fetchUsers}
+            disabled={isLoading}
+            className="btn btn-secondary"
+          >
+            <span>{isLoading ? "Refreshing..." : "Refresh Registry"}</span>
+          </button>
         </div>
-        <input
-          type="password"
-          value={adminKey}
-          onChange={(e) => setAdminKey(e.target.value)}
-          placeholder="Enter Admin API Key"
-          style={{
-            flex: "1 1 220px",
-            padding: "6px 12px",
-            fontSize: "14px",
-            borderRadius: "6px",
-            border: "1px solid #d1d5db",
-            fontFamily: "monospace"
-          }}
-        />
-        <span style={{ fontSize: "12px", color: "#6b7280" }}>
-          (Required to authorize deletions)
-        </span>
       </div>
 
-      {/* Feedback Messages (Success / Error) */}
+      {/* Filter & Security Controls Bar */}
+      <div className="user-mgmt-controls-bar">
+        {/* Search Input */}
+        <div className="search-input-wrapper">
+          <span className="search-icon">🔍</span>
+          <input
+            type="text"
+            className="cyber-input"
+            placeholder="Filter by User ID, Name, Email, or Role..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+        </div>
+
+        {/* Masked Admin Key Authorization Bar */}
+        <div className="admin-key-wrapper">
+          <div className="admin-key-label">
+            <span>🔑 ADMIN KEY:</span>
+          </div>
+          <input
+            type={showAdminKey ? "text" : "password"}
+            value={adminKey}
+            onChange={(e) => setAdminKey(e.target.value)}
+            placeholder="Enter Admin Authorization Key..."
+            className="admin-key-input"
+            autoComplete="off"
+          />
+          <button
+            type="button"
+            onClick={() => setShowAdminKey(!showAdminKey)}
+            style={{
+              background: "transparent",
+              border: "none",
+              color: "var(--text-muted)",
+              cursor: "pointer",
+              padding: "4px 8px",
+              fontSize: "12px"
+            }}
+            title={showAdminKey ? "Mask Key" : "Show Key"}
+          >
+            {showAdminKey ? "Hide" : "Show"}
+          </button>
+        </div>
+      </div>
+
+      {/* Feedback Messages */}
       {feedback.message && (
         <div
-          style={{
-            padding: "12px 16px",
-            borderRadius: "8px",
-            marginBottom: "18px",
-            fontSize: "14px",
-            fontWeight: "500",
-            background: feedback.type === "success" ? "#ecfdf5" : "#fef2f2",
-            border: `1px solid ${feedback.type === "success" ? "#a7f3d0" : "#fecaca"}`,
-            color: feedback.type === "success" ? "#065f46" : "#991b1b",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between"
-          }}
+          className={`cyber-feedback-box ${feedback.type === "success" ? "success" : "error"}`}
+          style={{ marginBottom: "var(--space-md)", marginTop: 0 }}
         >
-          <div>
-            <span>{feedback.type === "success" ? "✅ " : "⚠️ "}</span>
-            {feedback.message}
+          <div className="feedback-icon">
+            {feedback.type === "success" ? "✓" : "⚠️"}
+          </div>
+          <div className="feedback-content">
+            <div>{feedback.message}</div>
           </div>
           <button
             onClick={() => setFeedback({ type: null, message: "" })}
@@ -184,7 +215,8 @@ function UserManagement() {
               border: "none",
               cursor: "pointer",
               fontSize: "16px",
-              color: "inherit"
+              color: "inherit",
+              marginLeft: "auto"
             }}
           >
             ✕
@@ -192,215 +224,128 @@ function UserManagement() {
         </div>
       )}
 
-      {/* Users Table / List */}
-      {isLoading && users.length === 0 ? (
-        <div style={{ textAlign: "center", padding: "40px", color: "#6b7280" }}>
-          Loading registered users...
-        </div>
-      ) : users.length === 0 ? (
-        <div
-          style={{
-            textAlign: "center",
-            padding: "40px 20px",
-            border: "2px dashed #e5e7eb",
-            borderRadius: "8px",
-            color: "#6b7280"
-          }}
-        >
-          <div style={{ fontSize: "36px", marginBottom: "8px" }}>👤</div>
-          <p style={{ margin: 0, fontWeight: "500" }}>No registered users found.</p>
-          <p style={{ margin: "4px 0 0 0", fontSize: "13px" }}>
-            Switch to the Registration tab to enroll a face profile.
-          </p>
-        </div>
-      ) : (
-        <div style={{ overflowX: "auto", border: "1px solid #e5e7eb", borderRadius: "8px" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "left", fontSize: "14px" }}>
-            <thead>
-              <tr style={{ background: "#f9fafb", borderBottom: "1px solid #e5e7eb" }}>
-                <th style={{ padding: "12px 16px", fontWeight: "600", color: "#374151" }}>User ID</th>
-                <th style={{ padding: "12px 16px", fontWeight: "600", color: "#374151" }}>Registration Date</th>
-                <th style={{ padding: "12px 16px", fontWeight: "600", color: "#374151" }}>Biometric Status</th>
-                <th style={{ padding: "12px 16px", fontWeight: "600", color: "#374151", textAlign: "right" }}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {users.map((user, idx) => (
-                <tr
-                  key={user.user_id}
-                  style={{
-                    borderBottom: idx === users.length - 1 ? "none" : "1px solid #f3f4f6",
-                    transition: "background-color 0.15s"
-                  }}
-                >
-                  <td style={{ padding: "12px 16px" }}>
-                    <code
-                      style={{
-                        background: "#f3f4f6",
-                        padding: "3px 8px",
-                        borderRadius: "4px",
-                        fontWeight: "600",
-                        color: "#1f2937"
-                      }}
-                    >
-                      {user.user_id}
-                    </code>
-                  </td>
-                  <td style={{ padding: "12px 16px", color: "#4b5563" }}>
-                    {user.created_at ? new Date(user.created_at).toLocaleString() : "—"}
-                  </td>
-                  <td style={{ padding: "12px 16px" }}>
-                    {user.has_embedding ? (
-                      <span
-                        style={{
-                          display: "inline-block",
-                          padding: "2px 8px",
-                          borderRadius: "9999px",
-                          background: "#dcfce7",
-                          color: "#166534",
-                          fontSize: "12px",
-                          fontWeight: "600"
-                        }}
-                      >
-                        ● 512-D Synced
-                      </span>
-                    ) : (
-                      <span
-                        style={{
-                          display: "inline-block",
-                          padding: "2px 8px",
-                          borderRadius: "9999px",
-                          background: "#fee2e2",
-                          color: "#991b1b",
-                          fontSize: "12px",
-                          fontWeight: "600"
-                        }}
-                      >
-                        Missing Vector
-                      </span>
-                    )}
-                  </td>
-                  <td style={{ padding: "12px 16px", textAlign: "right" }}>
-                    <button
-                      onClick={() => promptDeleteUser(user)}
-                      style={{
-                        padding: "6px 14px",
-                        fontSize: "13px",
-                        fontWeight: "600",
-                        cursor: "pointer",
-                        borderRadius: "6px",
-                        background: "#fee2e2",
-                        color: "#dc2626",
-                        border: "1px solid #fecaca",
-                        transition: "all 0.15s"
-                      }}
-                      onMouseOver={(e) => {
-                        e.currentTarget.style.background = "#dc2626";
-                        e.currentTarget.style.color = "#ffffff";
-                      }}
-                      onMouseOut={(e) => {
-                        e.currentTarget.style.background = "#fee2e2";
-                        e.currentTarget.style.color = "#dc2626";
-                      }}
-                    >
-                      🗑️ Delete
-                    </button>
-                  </td>
+      {/* Users Table Card Container */}
+      <div className="table-card-container">
+        {isLoading && users.length === 0 ? (
+          <div className="table-loading-state">
+            <span className="status-dot status-dot-cyan" style={{ width: "12px", height: "12px" }}></span>
+            <div className="state-title">Querying PostgreSQL Vector Registry...</div>
+            <div className="state-subtitle">Loading user profiles and verifying 512-D vector synchronization.</div>
+          </div>
+        ) : users.length === 0 ? (
+          <div className="table-empty-state">
+            <div className="state-icon">🛡️</div>
+            <div className="state-title">No Registered Users in Registry</div>
+            <div className="state-subtitle">
+              Navigate to the Registration tab to enroll a new biometric profile.
+            </div>
+          </div>
+        ) : filteredUsers.length === 0 ? (
+          <div className="table-empty-state">
+            <div className="state-icon">🔍</div>
+            <div className="state-title">No Matching Records</div>
+            <div className="state-subtitle">
+              No users found matching query &ldquo;{searchQuery}&rdquo;. Try another filter term.
+            </div>
+          </div>
+        ) : (
+          <div className="table-scroll-wrapper">
+            <table className="cyber-table">
+              <thead>
+                <tr>
+                  <th>User ID</th>
+                  <th>Full Name</th>
+                  <th>Work Email</th>
+                  <th>Role</th>
+                  <th>Registration Date</th>
+                  <th>Face Embedding Status</th>
+                  <th className="align-right">Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+              </thead>
+              <tbody>
+                {filteredUsers.map((user) => (
+                  <tr key={user.user_id}>
+                    <td>
+                      <span className="user-id-badge">{user.user_id}</span>
+                    </td>
+                    <td style={{ fontWeight: 600 }}>
+                      {user.full_name || "—"}
+                    </td>
+                    <td style={{ color: "var(--text-secondary)", fontFamily: "var(--font-mono)", fontSize: "12.5px" }}>
+                      {user.email || "—"}
+                    </td>
+                    <td>
+                      {user.role ? (
+                        <span className="badge badge-cyber badge-mono">{user.role}</span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td>
+                      <span className="user-date-text">
+                        {user.created_at ? new Date(user.created_at).toLocaleString() : "—"}
+                      </span>
+                    </td>
+                    <td>
+                      {user.has_embedding ? (
+                        <span className="status-badge-synced">
+                          ● 512-D VECTOR SYNCED
+                        </span>
+                      ) : (
+                        <span className="status-badge-missing">
+                          ● VECTOR MISSING
+                        </span>
+                      )}
+                    </td>
+                    <td className="align-right">
+                      <button
+                        onClick={() => promptDeleteUser(user)}
+                        className="btn btn-danger btn-table-delete"
+                      >
+                        Delete Profile
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
-      {/* Confirmation Dialog / Modal */}
+      {/* Delete Confirmation Modal */}
       {confirmDialog.open && confirmDialog.user && (
-        <div
-          style={{
-            position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: "rgba(0, 0, 0, 0.5)",
-            backdropFilter: "blur(2px)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 1000
-          }}
-        >
-          <div
-            style={{
-              background: "#ffffff",
-              borderRadius: "12px",
-              padding: "24px",
-              maxWidth: "460px",
-              width: "90%",
-              boxShadow: "0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)"
-            }}
-          >
-            <div style={{ textAlign: "center", marginBottom: "16px" }}>
-              <div style={{ fontSize: "42px", marginBottom: "8px" }}>⚠️</div>
-              <h3 style={{ margin: "0 0 8px 0", color: "#111827", fontSize: "18px" }}>
-                Confirm User Deletion
-              </h3>
-              <p style={{ margin: 0, color: "#4b5563", fontSize: "14px", lineHeight: "1.5" }}>
-                Are you sure you want to permanently delete user{" "}
-                <strong style={{ color: "#dc2626", wordBreak: "break-all" }}>
-                  {confirmDialog.user.user_id}
-                </strong>
-                ?
-              </p>
+        <div className="modal-backdrop" onClick={cancelDelete}>
+          <div className="modal-dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header-section">
+              <div className="modal-warning-icon">⚠️</div>
+              <div className="modal-title-group">
+                <h3>Confirm Biometric Profile Purge</h3>
+                <p>ACTION CANNOT BE UNDONE</p>
+              </div>
             </div>
 
-            <div
-              style={{
-                background: "#fef2f2",
-                border: "1px solid #fee2e2",
-                borderRadius: "8px",
-                padding: "12px",
-                marginBottom: "20px",
-                fontSize: "13px",
-                color: "#991b1b",
-                lineHeight: "1.4"
-              }}
-            >
-              This will permanently delete the user's PostgreSQL database record, 512-D FaceNet embedding vector, FAISS search index, and cropped face image files. This action cannot be undone.
-            </div>
+            <p className="modal-body-text">
+              Are you sure you want to permanently delete user{" "}
+              <span className="modal-user-target">{confirmDialog.user.user_id}</span>?
+              <br /><br />
+              This will purge the PostgreSQL user profile, permanently delete the 512-D FaceNet embedding, remove the vector from FAISS IndexFlatIP, and delete all associated cropped face images.
+            </p>
 
-            <div style={{ display: "flex", gap: "10px", justifyContent: "flex-end" }}>
+            <div className="modal-actions">
               <button
                 onClick={cancelDelete}
                 disabled={isDeleting}
-                style={{
-                  padding: "8px 16px",
-                  borderRadius: "6px",
-                  border: "1px solid #d1d5db",
-                  background: "#ffffff",
-                  color: "#374151",
-                  fontWeight: "600",
-                  fontSize: "14px",
-                  cursor: isDeleting ? "not-allowed" : "pointer"
-                }}
+                className="btn btn-outline"
               >
                 Cancel
               </button>
               <button
                 onClick={executeDelete}
                 disabled={isDeleting}
-                style={{
-                  padding: "8px 18px",
-                  borderRadius: "6px",
-                  border: "none",
-                  background: isDeleting ? "#9ca3af" : "#dc2626",
-                  color: "#ffffff",
-                  fontWeight: "600",
-                  fontSize: "14px",
-                  cursor: isDeleting ? "not-allowed" : "pointer"
-                }}
+                className="btn btn-danger"
               >
-                {isDeleting ? "Deleting..." : "Yes, Delete User"}
+                {isDeleting ? "Purging User..." : "Confirm & Delete Profile"}
               </button>
             </div>
           </div>
@@ -411,4 +356,3 @@ function UserManagement() {
 }
 
 export default UserManagement;
-

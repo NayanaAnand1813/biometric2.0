@@ -1,13 +1,14 @@
 import { useState, useRef, useEffect } from "react";
+import "./Login.css";
 
 const LOGIN_STAGES = [
-  { id: 1, label: "Initializing Camera" },
-  { id: 2, label: "Checking Face Liveness" },
-  { id: 3, label: "Real Face Verified" },
-  { id: 4, label: "Detecting Face with MediaPipe" },
-  { id: 5, label: "Generating Face Embedding" },
-  { id: 6, label: "Verifying Identity in FAISS" },
-  { id: 7, label: "Access Status" },
+  { id: 1, label: "Initializing Camera & Sensor" },
+  { id: 2, label: "Anti-Spoofing Liveness Evaluation" },
+  { id: 3, label: "Biometric Authenticity Confirmed" },
+  { id: 4, label: "MediaPipe BlazeFace Landmark Alignment" },
+  { id: 5, label: "FaceNet 512-D Embedding Extraction" },
+  { id: 6, label: "FAISS 1:N Vector Identification" },
+  { id: 7, label: "Access Authorization Confirmed" },
 ];
 
 function Login() {
@@ -65,7 +66,7 @@ function Login() {
 
     // Step 1: Initializing Camera
     setCurrentStage(1);
-    setMessage("Step 1/7: Initializing Camera & requesting webcam access...");
+    setMessage("Step 1/7: Initializing Camera & requesting secure optical stream...");
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setStatusType("error");
@@ -107,7 +108,7 @@ function Login() {
         videoRef.current.srcObject = stream;
       }
       setCameraOn(true);
-      setMessage("Camera active. Aligning face in frame...");
+      setMessage("Camera active. Align face directly within the reticle...");
 
       // Wait for camera video feed to be ready and playing
       const video = videoRef.current;
@@ -152,7 +153,7 @@ function Login() {
 
       // Step 2: Checking Face Liveness on active live webcam stream
       setCurrentStage(2);
-      setMessage("Step 2/7: Checking Face Liveness with MiniFASNet anti-spoofing model...");
+      setMessage("Step 2/7: Checking Face Liveness with MiniFASNet anti-spoofing engine...");
 
       let isVerified = false;
       let verifiedResult = null;
@@ -182,7 +183,7 @@ function Login() {
         const verifyResult = await verifyResp.json();
 
         if (verifyResult.status === "no_face") {
-          setMessage(`Step 2/7: No face detected (${attempt}/${maxLivenessAttempts}). Please center your face in the camera frame.`);
+          setMessage(`Step 2/7: Position face in reticle (${attempt}/${maxLivenessAttempts}). Searching for subject...`);
           await delay(350);
           continue;
         }
@@ -191,7 +192,7 @@ function Login() {
           // Spoof detected: reject attempt immediately. Do NOT capture or process any face!
           setStatusType("error");
           setCurrentStage(2);
-          setMessage("Liveness verification failed: Fake or spoof face detected. Real face required. Login rejected.");
+          setMessage("Liveness verification rejected: Synthetic or replay artifact detected. Real person required.");
           setLivenessData(verifyResult);
           return;
         }
@@ -202,25 +203,21 @@ function Login() {
           break;
         }
 
-        setMessage(`Step 2/7: Analyzing live face (${attempt}/${maxLivenessAttempts}). Please look at the camera...`);
+        setMessage(`Step 2/7: Analyzing live face stability (${attempt}/${maxLivenessAttempts}). Look directly at camera...`);
         await delay(300);
       }
 
       if (!isVerified) {
         setStatusType("error");
         setCurrentStage(2);
-        setMessage("Liveness verification timed out without confirming a live, real face. Login rejected.");
+        setMessage("Liveness verification timed out without confirming a live person. Login rejected.");
         return;
       }
 
-      // Step 3: Real Face Verified
+      // Step 3: Real Face Verified (Zero percentage leakage)
       setLivenessData(verifiedResult);
-      const confScore = verifiedResult.score
-        ? (verifiedResult.score * 100).toFixed(1)
-        : "99.9";
-
       setCurrentStage(3);
-      setMessage(`Step 3/7: Real Face Verified! (MiniFASNet Confidence: ${confScore}%)`);
+      setMessage("Step 3/7: Real Face Verified! Biometric authenticity confirmed.");
       await delay(350);
 
       // Step 4: ONLY after successful liveness verification, capture face from active webcam
@@ -234,7 +231,7 @@ function Login() {
       }
 
       setCurrentStage(4);
-      setMessage("Step 4/7: Detecting Face with MediaPipe BlazeFace in memory...");
+      setMessage("Step 4/7: Detecting facial landmarks with MediaPipe BlazeFace...");
 
       // Send to /login with verified session_id (Pure 1:N Identification)
       const loginFormData = new FormData();
@@ -264,7 +261,7 @@ function Login() {
 
       // Step 5: Generating Face Embedding
       setCurrentStage(5);
-      setMessage("Step 5/7: Generating 512-D FaceNet Probe Embedding...");
+      setMessage("Step 5/7: Extracting 512-D L2-normalized FaceNet probe embedding...");
       await delay(350);
 
       // Step 6: Verifying Identity in FAISS
@@ -285,17 +282,17 @@ function Login() {
       if (currentStage < 2) setCurrentStage(1);
 
       if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
-        setMessage("Camera permission was denied. Please allow camera permissions in your browser settings to proceed.");
+        setMessage("Camera permission was denied. Please allow camera permissions in your browser to proceed.");
       } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
-        setMessage("No camera device was found on this system.");
+        setMessage("No video capture hardware detected on this workstation.");
       } else if (err.name === "NotReadableError" || err.name === "TrackStartError") {
-        setMessage("Camera is already in use by another application or unavailable.");
+        setMessage("Camera device is locked by another process or unavailable.");
       } else if (err.name === "OverconstrainedError") {
-        setMessage("Camera does not support the requested video constraints.");
+        setMessage("Camera hardware cannot support the requested video resolution.");
       } else if (err.message && err.message.includes("fetch")) {
-        setMessage("Failed to connect to backend server. Please verify FastAPI backend is running.");
+        setMessage("Backend connection refused. Ensure the OJIX FastAPI server is active.");
       } else {
-        setMessage(err.message || "An unexpected error occurred during login.");
+        setMessage(err.message || "An unexpected error occurred during biometric login.");
       }
     } finally {
       stopCamera();
@@ -304,272 +301,283 @@ function Login() {
     }
   };
 
-  const getStatusColor = () => {
-    if (statusType === "error") return "#dc2626";
-    if (statusType === "success") return "#16a34a";
-    if (statusType === "loading") return "#2563eb";
-    return "#333";
+  // Viewfinder dynamic status indicator
+  const getViewfinderStatus = () => {
+    if (!cameraOn) {
+      return { text: "Sensor Idle", dotClass: "status-dot" };
+    }
+    if (currentStage === 3 || statusType === "success") {
+      return { text: "Subject Verified", dotClass: "status-dot status-dot-verified" };
+    }
+    if (statusType === "error") {
+      return { text: "Verification Rejected", dotClass: "status-dot status-dot-denied" };
+    }
+    if (currentStage >= 1 && currentStage < 3) {
+      return { text: "Liveness Engine Active", dotClass: "status-dot status-dot-scanning" };
+    }
+    return { text: "Live Video Feed", dotClass: "status-dot status-dot-cyan" };
   };
 
-  // Render Access Granted / Welcome screen if authenticated
+  const vStatus = getViewfinderStatus();
+
+  // ==============================================================================
+  // PART 2: Access Granted Verification Certificate
+  // ==============================================================================
   if (authenticatedUser) {
     const displayName = authenticatedProfile?.full_name || authenticatedUser;
-    const livenessScore = livenessData?.score
-      ? (livenessData.score * 100).toFixed(1)
-      : "99.9";
 
     return (
-      <div style={{ textAlign: "center", padding: "20px" }}>
-        <div
-          style={{
-            maxWidth: "520px",
-            margin: "0 auto",
-            padding: "24px",
-            borderRadius: "12px",
-            background: "#f0fdf4",
-            border: "2px solid #16a34a",
-            boxShadow: "0 4px 14px rgba(22, 163, 74, 0.15)"
-          }}
-        >
-          <div style={{ fontSize: "48px", marginBottom: "8px" }}>🎉</div>
-          <h2 style={{ color: "#15803d", margin: "0 0 6px 0" }}>Access Granted!</h2>
-          <p style={{ fontSize: "17px", color: "#166534", margin: "0 0 18px 0" }}>
-            Welcome back, <strong>{displayName}</strong>
-          </p>
-
-          <div
-            style={{
-              background: "#ffffff",
-              padding: "18px 20px",
-              borderRadius: "8px",
-              border: "1px solid #bbf7d0",
-              textAlign: "left",
-              marginBottom: "20px",
-              fontSize: "14px",
-              color: "#374151"
-            }}
-          >
-            <div style={{ marginBottom: "10px", borderBottom: "1px solid #e5e7eb", paddingBottom: "8px" }}>
-              <span style={{ fontWeight: "600", color: "#15803d" }}>Liveness Verification: </span>
-              <span style={{ color: "#16a34a", fontWeight: "bold" }}>● Real Face Verified (MiniFASNet Confidence: {livenessScore}%)</span>
+      <div className="access-certificate-container">
+        <div className="cyber-certificate-card">
+          {/* Certificate Header */}
+          <div className="cert-header">
+            <div className="cert-header-left">
+              <div className="cert-emblem">🛡️</div>
+              <div className="cert-title-group">
+                <h3>Identity Verification Certificate</h3>
+                <p>Biometric Authentication Successful &bull; Session Active</p>
+              </div>
             </div>
+            <span className="badge badge-verified badge-mono">
+              ● IDENTITY MATCH CONFIRMED
+            </span>
+          </div>
 
-            <div style={{ marginBottom: "10px", borderBottom: "1px solid #e5e7eb", paddingBottom: "8px" }}>
-              <span style={{ fontWeight: "600", color: "#15803d" }}>Biometric Verification: </span>
-              <span style={{ color: "#16a34a", fontWeight: "bold" }}>● FAISS 1:N Exact Cosine Match</span>
+          {/* Authenticated User Banner */}
+          <div className="cert-user-banner">
+            <div>
+              <div style={{ fontSize: "11px", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "var(--font-mono)" }}>
+                Authenticated Subject
+              </div>
+              <div className="cert-user-name">{displayName}</div>
             </div>
-
-            <div style={{ marginBottom: "8px", display: "flex", justifyContent: "space-between" }}>
-              <span style={{ fontWeight: "600", color: "#4b5563" }}>Full Name:</span>
-              <span style={{ fontWeight: "600", color: "#111827" }}>
-                {authenticatedProfile?.full_name || "Not Provided"}
-              </span>
-            </div>
-
-            <div style={{ marginBottom: "8px", display: "flex", justifyContent: "space-between" }}>
-              <span style={{ fontWeight: "600", color: "#4b5563" }}>User ID:</span>
-              <code style={{ background: "#f3f4f6", padding: "2px 8px", borderRadius: "4px", fontWeight: "600" }}>
-                {authenticatedProfile?.user_id || authenticatedUser}
-              </code>
-            </div>
-
-            <div style={{ marginBottom: "8px", display: "flex", justifyContent: "space-between" }}>
-              <span style={{ fontWeight: "600", color: "#4b5563" }}>Work Email:</span>
-              <span style={{ color: "#111827" }}>
-                {authenticatedProfile?.email || "Not Provided"}
-              </span>
-            </div>
-
-            <div style={{ marginBottom: "8px", display: "flex", justifyContent: "space-between" }}>
-              <span style={{ fontWeight: "600", color: "#4b5563" }}>Role / Designation:</span>
-              <span style={{ color: "#111827" }}>
-                {authenticatedProfile?.role || "Not Provided"}
-              </span>
-            </div>
-
-            <div style={{ marginBottom: "12px", display: "flex", justifyContent: "space-between" }}>
-              <span style={{ fontWeight: "600", color: "#4b5563" }}>Phone Number:</span>
-              <span style={{ color: "#111827" }}>
-                {authenticatedProfile?.phone_number || "Not Provided"}
-              </span>
-            </div>
-
-            <div style={{ borderTop: "1px solid #f3f4f6", paddingTop: "8px", fontSize: "12px", color: "#6b7280" }}>
-              Pipeline: MiniFASNet Liveness → MediaPipe BlazeFace → FaceNet 512-D → FAISS Exact Match
+            <div className="cert-user-id-chip">
+              ID: {authenticatedProfile?.user_id || authenticatedUser}
             </div>
           </div>
 
-          <button
-            onClick={() => {
-              setAuthenticatedUser(null);
-              setAuthenticatedProfile(null);
-              setStatusType("idle");
-              setCurrentStage(0);
-              setMessage("");
-            }}
-            style={{
-              padding: "10px 24px",
-              fontSize: "15px",
-              fontWeight: "600",
-              cursor: "pointer",
-              borderRadius: "6px",
-              backgroundColor: "#15803d",
-              color: "#fff",
-              border: "none",
-              boxShadow: "0 2px 6px rgba(0,0,0,0.1)",
-              transition: "background-color 0.2s"
-            }}
-          >
-            Logout / Authenticate Another User
-          </button>
+          {/* Profile Metadata Grid */}
+          <div className="cert-metadata-grid">
+            <div className="cert-meta-item">
+              <span className="cert-meta-label">Full Name</span>
+              <span className="cert-meta-value">{authenticatedProfile?.full_name || "Verified Subject"}</span>
+            </div>
+
+            <div className="cert-meta-item">
+              <span className="cert-meta-label">Work Email</span>
+              <span className="cert-meta-value mono">{authenticatedProfile?.email || "Not Provided"}</span>
+            </div>
+
+            <div className="cert-meta-item">
+              <span className="cert-meta-label">Role / Designation</span>
+              <span className="cert-meta-value">{authenticatedProfile?.role || "Authorized Personnel"}</span>
+            </div>
+
+            <div className="cert-meta-item">
+              <span className="cert-meta-label">Contact Phone</span>
+              <span className="cert-meta-value mono">{authenticatedProfile?.phone_number || "Not Provided"}</span>
+            </div>
+          </div>
+
+          {/* Biometric Processing Details */}
+          <div className="cert-audit-rail">
+            <div className="cert-audit-row">
+              <span className="cert-audit-label">Liveness Verification:</span>
+              <span className="cert-audit-status">
+                <span className="status-dot status-dot-verified"></span>
+                MiniFASNet Real Subject Confirmed
+              </span>
+            </div>
+            <div className="cert-audit-row">
+              <span className="cert-audit-label">Biometric Search:</span>
+              <span className="cert-audit-status">
+                <span className="status-dot status-dot-cyan"></span>
+                FAISS 1:N Exact Cosine Match
+              </span>
+            </div>
+            <div className="cert-audit-row">
+              <span className="cert-audit-label">Vector Pipeline:</span>
+              <span className="cert-audit-status" style={{ color: "var(--text-secondary)" }}>
+                MediaPipe BlazeFace &rarr; FaceNet 512-D
+              </span>
+            </div>
+            <div className="cert-audit-row">
+              <span className="cert-audit-label">Storage Standard:</span>
+              <span className="cert-audit-status" style={{ color: "var(--accent-blue)" }}>
+                RAM-Only In-Memory Probe &bull; Zero Disk Storage
+              </span>
+            </div>
+          </div>
+
+          {/* Certificate Footer Action */}
+          <div className="cert-footer-action">
+            <button
+              onClick={() => {
+                setAuthenticatedUser(null);
+                setAuthenticatedProfile(null);
+                setStatusType("idle");
+                setCurrentStage(0);
+                setMessage("");
+              }}
+              className="btn btn-secondary btn-cert-logout"
+            >
+              <span>Terminate Session &bull; Authenticate Another User</span>
+            </button>
+          </div>
         </div>
       </div>
     );
   }
 
+  // ==============================================================================
+  // PART 1: Face Login Interface
+  // ==============================================================================
   return (
-    <div style={{ textAlign: "center", padding: "20px" }}>
-      <h2>Biometric Login with Live Camera Liveness Verification</h2>
-      <p style={{ color: "#666", marginBottom: "20px" }}>
-        Look directly at the camera. The system verifies face liveness in real-time and identifies you automatically through 1:N facial search.
-      </p>
-
-      {/* Live Camera Video Viewport (No Upload Option) */}
-      <div>
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
-          width="400"
-          style={{
-            background: "#222",
-            borderRadius: "8px",
-            boxShadow: "0 4px 10px rgba(0,0,0,0.15)",
-            border: cameraOn ? "2px solid #16a34a" : "2px solid #555",
-            minHeight: "300px",
-            display: "inline-block"
-          }}
-        />
+    <div className="login-container">
+      {/* Header */}
+      <div className="login-header">
+        <div className="login-header-badges">
+          <span className="badge badge-cyber badge-mono">1:N BIOMETRIC SEARCH</span>
+          <span className="badge badge-mono" style={{ background: "rgba(56, 189, 248, 0.1)", color: "var(--accent-blue)", border: "1px solid rgba(56, 189, 248, 0.3)" }}>
+            ZERO DISK PROBE
+          </span>
+        </div>
+        <h2>Biometric Face Identification</h2>
+        <p>
+          Look directly into the optical sensor. The system performs real-time anti-spoofing verification and matches your identity automatically across the enrolled vector registry.
+        </p>
       </div>
 
-      <br />
+      <div className="login-content-wrapper">
+        {/* Cyber Viewfinder Frame */}
+        <div
+          className={`login-viewfinder ${cameraOn ? "camera-active" : ""} ${
+            currentStage === 3 || statusType === "success" ? "liveness-verified" : ""
+          } ${statusType === "error" ? "liveness-failed" : ""}`}
+        >
+          {/* Status Overlay */}
+          <div className="login-status-bar">
+            <span className={vStatus.dotClass}></span>
+            <span>{vStatus.text}</span>
+          </div>
 
-      {/* Primary Action Button: Click to Login */}
-      <div style={{ display: "flex", gap: "10px", justifyContent: "center" }}>
+          {/* Corner Reticle Brackets */}
+          <div className="login-reticle-corner top-left"></div>
+          <div className="login-reticle-corner top-right"></div>
+          <div className="login-reticle-corner bottom-left"></div>
+          <div className="login-reticle-corner bottom-right"></div>
+
+          {/* Centered Face Alignment Target */}
+          <div className="login-alignment-oval">
+            <span>Align Face</span>
+          </div>
+
+          {/* Active Webcam Video Stream */}
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="login-video-stream"
+            style={{ display: cameraOn ? "block" : "none" }}
+          />
+
+          {/* Idle Placeholder when camera is inactive */}
+          {!cameraOn && (
+            <div className="login-idle-state">
+              <div className="login-idle-icon">🛡️</div>
+              <div className="login-idle-title">Biometric Scanner Standby</div>
+              <div className="login-idle-subtitle">
+                Click authenticate below to initialize optical stream and execute 1:N biometric search.
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Primary Action Button: Click to Login */}
         <button
           onClick={handleLoginClick}
           disabled={isLoading}
-          style={{
-            padding: "12px 28px",
-            fontSize: "16px",
-            cursor: isLoading ? "not-allowed" : "pointer",
-            borderRadius: "6px",
-            backgroundColor: isLoading ? "#9ca3af" : "#2563eb",
-            color: "#fff",
-            border: "none",
-            fontWeight: "bold",
-            boxShadow: "0 2px 8px rgba(37, 99, 235, 0.25)",
-            transition: "all 0.2s ease"
-          }}
+          className="btn btn-primary btn-login-submit"
         >
-          {isLoading ? "Verifying Liveness & Authenticating..." : "Click to Login"}
+          {isLoading ? (
+            <>
+              <span className="status-dot status-dot-scanning"></span>
+              <span>Scanning Face &amp; Authenticating...</span>
+            </>
+          ) : (
+            <span>Authenticate Biometric Access</span>
+          )}
         </button>
-      </div>
 
-      {/* 7-Step Liveness-First Processing Pipeline Stepper */}
-      {currentStage > 0 && (
-        <div
-          style={{
-            maxWidth: "520px",
-            margin: "20px auto 10px auto",
-            padding: "14px 16px",
-            borderRadius: "8px",
-            background: "#f9fafb",
-            border: "1px solid #e5e7eb",
-            textAlign: "left"
-          }}
-        >
-          <div style={{ fontSize: "13px", fontWeight: "700", color: "#374151", marginBottom: "10px" }}>
-            Pipeline Progress (Live Camera Liveness-First Verification):
+        {/* 7-Step Technical Pipeline Stepper */}
+        {currentStage > 0 && (
+          <div className="login-stepper-panel">
+            <div className="login-stepper-header">
+              <span className="login-stepper-title">Verification Pipeline</span>
+              <span className="badge badge-cyber badge-mono">
+                STAGE {currentStage} OF 7
+              </span>
+            </div>
+
+            <div className="login-stepper-list">
+              {LOGIN_STAGES.map((st) => {
+                const isPast = currentStage > st.id;
+                const isCurrent = currentStage === st.id;
+                const isFailed = isCurrent && statusType === "error";
+
+                let stateClass = "pending";
+                let indicatorText = `${st.id}`;
+
+                if (isPast || (isCurrent && statusType === "success")) {
+                  stateClass = "completed";
+                  indicatorText = "✓";
+                } else if (isFailed) {
+                  stateClass = "failed";
+                  indicatorText = "✕";
+                } else if (isCurrent) {
+                  stateClass = "active";
+                  indicatorText = "●";
+                }
+
+                return (
+                  <div key={st.id} className={`login-stepper-item ${stateClass}`}>
+                    <span className="login-step-indicator">{indicatorText}</span>
+                    <span className="login-step-label">{st.label}</span>
+                  </div>
+                );
+              })}
+            </div>
           </div>
+        )}
 
-          <div style={{ display: "grid", gap: "6px" }}>
-            {LOGIN_STAGES.map((st) => {
-              const isPast = currentStage > st.id;
-              const isCurrent = currentStage === st.id;
-              const isFailedAtThisStep = isCurrent && statusType === "error";
-
-              let icon = "⚪";
-              let textColor = "#6b7280";
-              let fontWeight = "normal";
-
-              if (isPast) {
-                icon = "✅";
-                textColor = "#15803d";
-                fontWeight = "600";
-              } else if (isFailedAtThisStep) {
-                icon = "❌";
-                textColor = "#dc2626";
-                fontWeight = "bold";
-              } else if (isCurrent) {
-                icon = statusType === "success" ? "✅" : "⏳";
-                textColor = statusType === "success" ? "#15803d" : "#2563eb";
-                fontWeight = "bold";
-              }
-
-              return (
-                <div
-                  key={st.id}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "8px",
-                    fontSize: "13px",
-                    color: textColor,
-                    fontWeight: fontWeight
-                  }}
-                >
-                  <span>{icon}</span>
-                  <span>{st.id}. {st.label}</span>
-                  {st.id === 2 && livenessData && (
-                    <span style={{ fontSize: "11px", color: livenessData.is_real ? "#15803d" : "#dc2626", marginLeft: "auto" }}>
-                      Score: {(livenessData.score * 100).toFixed(1)}% (Threshold: 85%)
-                    </span>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Loading & Status Feedback Display */}
-      {message && (
-        <div
-          style={{
-            marginTop: "14px",
-            padding: "10px 16px",
-            borderRadius: "6px",
-            display: "inline-block",
-            maxWidth: "520px",
-            background:
+        {/* Feedback Alert Box */}
+        {message && (
+          <div
+            className={`cyber-feedback-box ${
               statusType === "error"
-                ? "#fee2e2"
+                ? "error"
                 : statusType === "success"
-                ? "#dcfce7"
-                : "#eff6ff",
-            color: getStatusColor(),
-            fontWeight: "500",
-            border: `1px solid ${getStatusColor()}`
-          }}
-        >
-          {statusType === "loading" && <span>⏳ </span>}
-          {statusType === "success" && <span>✅ </span>}
-          {statusType === "error" && <span>⚠️ </span>}
-          {message}
-        </div>
-      )}
+                ? "success"
+                : "loading"
+            }`}
+          >
+            <div className="feedback-icon">
+              {statusType === "error" && "⚠️"}
+              {statusType === "success" && "✓"}
+              {statusType === "loading" && "●"}
+            </div>
+            <div className="feedback-content">
+              <div>{message}</div>
+              {livenessData && (
+                <div className="feedback-meta">
+                  Liveness Engine: {livenessData.label || livenessData.status} (Verified)
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
