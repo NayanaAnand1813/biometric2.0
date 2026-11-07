@@ -140,16 +140,27 @@ def register_user_with_embedding(
             print(f"[DB SUCCESS] Registered user '{confirmed_uid}' with profile and {confirmed_dim}-D embedding.")
 
             # Step 4: Safe FAISS synchronization - Add to FAISS ONLY after successful DB commit
+            faiss_synced = False
             try:
                 from faiss_service import get_faiss_manager
                 faiss_mgr = get_faiss_manager()
                 faiss_mgr.add_user(confirmed_uid, embedding_vector)
+                faiss_synced = True
             except Exception as faiss_err:
                 print(f"[FAISS SYNC WARNING] Post-commit FAISS sync for '{confirmed_uid}': {faiss_err}. Initiating index reconciliation...")
                 try:
                     faiss_mgr.initialize_from_database()
+                    faiss_synced = True
                 except Exception as recon_err:
                     print(f"[FAISS RECONCILIATION ERROR] Index reconciliation failed: {recon_err}")
+                    faiss_synced = False
+
+            indexing_status = "synced" if faiss_synced else "reconciliation_pending"
+            msg = (
+                "User registered and profile stored successfully in PostgreSQL."
+                if faiss_synced
+                else "User profile stored in PostgreSQL; FAISS index synchronization is pending reconciliation."
+            )
 
             return {
                 "status": "success",
@@ -160,7 +171,9 @@ def register_user_with_embedding(
                 "phone_number": confirmed_phone or "",
                 "created_at": confirmed_created_at.isoformat() if hasattr(confirmed_created_at, "isoformat") else str(confirmed_created_at),
                 "embedding_dimension": confirmed_dim,
-                "message": "User registered and profile stored successfully in PostgreSQL."
+                "faiss_synced": faiss_synced,
+                "indexing_status": indexing_status,
+                "message": msg
             }
 
         except errors.UniqueViolation as uv_err:

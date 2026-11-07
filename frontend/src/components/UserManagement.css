@@ -5,6 +5,10 @@
 
 .user-mgmt-container {
   width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   box-sizing: border-box;
   text-align: left;
 }
@@ -13,19 +17,20 @@
 .user-mgmt-header {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: var(--space-lg);
-  padding-bottom: var(--space-md);
+  align-items: center;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
   border-bottom: 1px solid var(--border-subtle);
   flex-wrap: wrap;
-  gap: var(--space-md);
+  gap: 10px;
+  flex-shrink: 0;
 }
 
 .user-mgmt-title-group h2 {
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 700;
   color: var(--text-primary);
-  margin: 0 0 4px 0;
+  margin: 0 0 2px 0;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   display: flex;
@@ -34,7 +39,7 @@
 }
 
 .user-mgmt-title-group p {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-secondary);
   margin: 0;
 }
@@ -51,12 +56,12 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 12px;
+  padding: 5px 10px;
   background: var(--bg-surface);
   border: 1px solid var(--border-medium);
   border-radius: var(--radius-md);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-secondary);
 }
 
@@ -69,8 +74,9 @@
 .user-mgmt-controls-bar {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: var(--space-md);
-  margin-bottom: var(--space-lg);
+  gap: 12px;
+  margin-bottom: 10px;
+  flex-shrink: 0;
 }
 
 @media (max-width: 768px) {
@@ -89,12 +95,15 @@
   position: absolute;
   left: 12px;
   color: var(--text-muted);
-  font-size: 14px;
+  font-size: 13px;
   pointer-events: none;
 }
 
 .search-input-wrapper .cyber-input {
-  padding-left: 36px;
+  padding-left: 34px;
+  padding-top: 7px;
+  padding-bottom: 7px;
+  font-size: 12.5px;
 }
 
 /* Admin Authorization Input Container */
@@ -105,7 +114,7 @@
   background: var(--bg-surface);
   border: 1px solid var(--border-medium);
   border-radius: var(--radius-md);
-  padding: 4px 8px 4px 12px;
+  padding: 3px 8px 3px 12px;
 }
 
 .admin-key-label {
@@ -113,7 +122,7 @@
   align-items: center;
   gap: 6px;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
@@ -127,8 +136,8 @@
   border: none;
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: 13px;
-  padding: 6px 8px;
+  font-size: 12.5px;
+  padding: 5px 8px;
   outline: none;
 }
 
@@ -138,15 +147,22 @@
 
 /* Table Card Container */
 .table-card-container {
+  flex: 1;
+  min-height: 0;
   background: var(--bg-surface);
   border: 1px solid var(--border-medium);
   border-radius: var(--radius-lg);
   overflow: hidden;
   box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-direction: column;
 }
 
 .table-scroll-wrapper {
+  flex: 1;
+  min-height: 0;
   width: 100%;
+  overflow-y: auto;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
 }
@@ -156,23 +172,27 @@
   width: 100%;
   border-collapse: collapse;
   text-align: left;
-  font-size: 13.5px;
+  font-size: 12.5px;
 }
 
 .cyber-table thead tr {
   background: var(--bg-card);
   border-bottom: 1px solid var(--border-medium);
+  position: sticky;
+  top: 0;
+  z-index: 5;
 }
 
 .cyber-table th {
-  padding: 12px 16px;
+  padding: 10px 14px;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 700;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   white-space: nowrap;
+  background: var(--bg-card);
 }
 
 .cyber-table th.align-right {
@@ -193,7 +213,7 @@
 }
 
 .cyber-table td {
-  padding: 14px 16px;
+  padding: 10px 14px;
   color: var(--text-primary);
   vertical-align: middle;
   white-space: nowrap;
@@ -205,18 +225,18 @@
 
 .user-id-badge {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 600;
   color: var(--accent-cyan);
   background: var(--bg-input);
   border: 1px solid var(--border-accent);
-  padding: 3px 8px;
+  padding: 2px 7px;
   border-radius: var(--radius-sm);
 }
 
 .user-date-text {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-muted);
 }
 
@@ -224,11 +244,11 @@
 .status-badge-synced {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 3px 10px;
+  gap: 5px;
+  padding: 2px 8px;
   border-radius: var(--radius-full);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 700;
   letter-spacing: 0.04em;
   background: var(--status-verified-glow);
@@ -239,11 +259,11 @@
 .status-badge-missing {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 3px 10px;
+  gap: 5px;
+  padding: 2px 8px;
   border-radius: var(--radius-full);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 700;
   letter-spacing: 0.04em;
   background: var(--status-denied-glow);
@@ -253,15 +273,15 @@
 
 /* Action Button */
 .btn-table-delete {
-  padding: 6px 12px;
-  font-size: 12px;
-  min-height: 32px;
+  padding: 4px 10px;
+  font-size: 11px;
+  min-height: 28px;
 }
 
 /* Empty / Loading States */
 .table-empty-state,
 .table-loading-state {
-  padding: 48px 24px;
+  padding: 36px 20px;
   text-align: center;
   display: flex;
   flex-direction: column;
@@ -271,18 +291,18 @@
 }
 
 .state-icon {
-  font-size: 32px;
+  font-size: 28px;
   opacity: 0.75;
 }
 
 .state-title {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
 }
 
 .state-subtitle {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-muted);
   max-width: 320px;
 }
@@ -300,80 +320,64 @@
   justify-content: center;
   z-index: 1000;
   padding: var(--space-md);
-  animation: modalFadeIn 200ms ease-out forwards;
-}
-
-@keyframes modalFadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  box-sizing: border-box;
 }
 
 .modal-dialog {
   background: var(--bg-card);
   border: 1px solid var(--status-denied-border);
   border-radius: var(--radius-xl);
-  box-shadow: 0 0 35px rgba(244, 63, 94, 0.15), var(--shadow-modal);
-  max-width: 460px;
+  box-shadow: var(--shadow-modal), 0 0 30px var(--status-denied-glow);
+  max-width: 500px;
   width: 100%;
-  padding: var(--space-xl);
-  text-align: left;
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
 .modal-header-section {
   display: flex;
   align-items: center;
-  gap: 14px;
-  margin-bottom: var(--space-md);
+  gap: 12px;
 }
 
 .modal-warning-icon {
-  width: 44px;
-  height: 44px;
-  border-radius: var(--radius-md);
-  background: var(--status-denied-glow);
-  border: 1px solid var(--status-denied-border);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 22px;
-  flex-shrink: 0;
+  font-size: 28px;
 }
 
 .modal-title-group h3 {
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 700;
   color: var(--text-primary);
-  margin: 0 0 2px 0;
+  margin: 0;
 }
 
 .modal-title-group p {
-  font-size: 12px;
-  color: var(--status-denied-text);
-  margin: 0;
   font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--status-denied-text);
+  letter-spacing: 0.08em;
+  margin: 0;
 }
 
 .modal-body-text {
-  font-size: 13.5px;
+  font-size: 13px;
   color: var(--text-secondary);
   line-height: 1.5;
-  margin-bottom: var(--space-lg);
+  margin: 0;
 }
 
 .modal-user-target {
   font-family: var(--font-mono);
-  color: var(--text-primary);
-  background: var(--bg-surface);
-  border: 1px solid var(--border-medium);
-  padding: 2px 8px;
-  border-radius: var(--radius-xs);
   font-weight: 700;
+  color: var(--accent-cyan);
 }
 
 .modal-actions {
   display: flex;
-  align-items: center;
   justify-content: flex-end;
-  gap: var(--space-sm);
+  gap: 10px;
+  margin-top: 4px;
 }
-

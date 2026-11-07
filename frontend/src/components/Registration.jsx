@@ -1,41 +1,58 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import "./Registration.css";
 
-const REGISTRATION_STAGES = [
-  { id: 1, label: "Initializing Camera & Sensor" },
-  { id: 2, label: "Anti-Spoofing Liveness Evaluation" },
-  { id: 3, label: "Biometric Authenticity Confirmed" },
-  { id: 4, label: "MediaPipe BlazeFace Landmark Alignment" },
-  { id: 5, label: "FaceNet 512-D Embedding Extraction" },
-  { id: 6, label: "PostgreSQL & FAISS Vector Commitment" },
-  { id: 7, label: "Identity Enrollment Complete" },
+// 8 Workflow States
+const WORKFLOW_STATES = {
+  DETAILS_REQUIRED: "DETAILS REQUIRED",
+  CAMERA_READY: "CAMERA READY",
+  CHECKING_LIVENESS: "CHECKING LIVENESS",
+  LIVE_FACE_DETECTED: "LIVE FACE DETECTED",
+  FACE_CAPTURED: "FACE CAPTURED",
+  AWAITING_CONFIRMATION: "AWAITING CONFIRMATION",
+  REGISTERING: "REGISTERING",
+  REGISTRATION_SUCCESSFUL: "REGISTRATION SUCCESSFUL",
+};
+
+const PIPELINE_STAGES = [
+  { id: 1, label: "Stage A: Identity Details Entry", states: [WORKFLOW_STATES.DETAILS_REQUIRED] },
+  { id: 2, label: "Stage B: Live Anti-Spoofing & Capture", states: [WORKFLOW_STATES.CAMERA_READY, WORKFLOW_STATES.CHECKING_LIVENESS, WORKFLOW_STATES.LIVE_FACE_DETECTED, WORKFLOW_STATES.FACE_CAPTURED] },
+  { id: 3, label: "Stage C: Review & Confirm Capture", states: [WORKFLOW_STATES.AWAITING_CONFIRMATION] },
+  { id: 4, label: "Stage D: Register, Embed & Index", states: [WORKFLOW_STATES.REGISTERING, WORKFLOW_STATES.REGISTRATION_SUCCESSFUL] },
 ];
 
 function Registration() {
-  const [userId, setUserId] = useState("");
+  // Identity Credential Form Fields
   const [fullName, setFullName] = useState("");
+  const [userId, setUserId] = useState("");
   const [email, setEmail] = useState("");
-  const [role, setRole] = useState("");
   const [phoneNumber, setPhoneNumber] = useState("");
+  const [role, setRole] = useState("");
 
-  const [message, setMessage] = useState("");
+  // Workflow State Machine
+  const [workflowState, setWorkflowState] = useState(WORKFLOW_STATES.DETAILS_REQUIRED);
+  const [message, setMessage] = useState("Enter user identity details and click ADD FACE to initialize optical sensor.");
   const [statusType, setStatusType] = useState("idle"); // idle | loading | success | error
-  const [currentStage, setCurrentStage] = useState(0); // 0 to 7
-  const [cameraOn, setCameraOn] = useState(false);
+
+  // Session & Temporary Face Storage (RAM-only)
+  const [sessionId, setSessionId] = useState(null);
+  const [capturedPreviewUrl, setCapturedPreviewUrl] = useState(null);
+  const [isFaceConfirmed, setIsFaceConfirmed] = useState(false);
+  const [cameraActive, setCameraActive] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [livenessData, setLivenessData] = useState(null);
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const isProcessingRef = useRef(false);
 
-  // Stop webcam helper
+  // Stop active webcam and clean tracks
   const stopCamera = () => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => {
         try {
           track.stop();
-        } catch (_) {}
+        } catch {
+          // ignore track stop error
+        }
       });
       streamRef.current = null;
     }
@@ -44,23 +61,23 @@ function Registration() {
       videoRef.current.srcObject = null;
     }
 
-    setCameraOn(false);
+    setCameraActive(false);
   };
 
-  // Cleanup camera stream on component unmount
+  // Cleanup camera stream and temporary blob URL on unmount
   useEffect(() => {
     return () => {
       stopCamera();
+      if (capturedPreviewUrl) {
+        URL.revokeObjectURL(capturedPreviewUrl);
+      }
     };
-  }, []);
+  }, [capturedPreviewUrl]);
 
   const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  // Automated Camera-Only Liveness-First Face Registration workflow
-  const handleRegisterClick = async () => {
-    if (isLoading || isProcessingRef.current) return;
-
-    // 1. Mandatory Fields Validation
+  // Field validation helper (Stage A)
+  const validateFormDetails = useCallback(() => {
     const cleanId = userId.trim();
     const cleanFullName = fullName.trim();
     const cleanEmail = email.trim();
@@ -68,61 +85,92 @@ function Registration() {
     const cleanPhone = phoneNumber.trim();
 
     if (!cleanId || !cleanFullName || !cleanEmail || !cleanRole || !cleanPhone) {
-      setStatusType("error");
-      setMessage("All five fields (User ID, Full Name, Work Email, Role, Phone Number) are mandatory.");
-      return;
+      return {
+        valid: false,
+        error: "All five fields (Full Name, User ID, Work Email, Phone Number, Role) are mandatory."
+      };
     }
 
-    // 2. Email Normalization and Format Validation
     const normalizedEmail = cleanEmail.toLowerCase();
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(normalizedEmail)) {
-      setStatusType("error");
-      setMessage("Please enter a valid work email address (e.g. name@company.com).");
-      return;
+      return {
+        valid: false,
+        error: "Please enter a valid work email address (e.g. name@company.com)."
+      };
     }
 
-    // 3. Phone Number Format Validation
     const phoneDigits = cleanPhone.replace(/\D/g, "");
     const phoneRegex = /^\+?[0-9\s\-()]{7,20}$/;
     if (!phoneRegex.test(cleanPhone) || phoneDigits.length < 7) {
+      return {
+        valid: false,
+        error: "Please enter a valid phone number (at least 7 digits, e.g. +1 555-0123)."
+      };
+    }
+
+    return {
+      valid: true,
+      data: {
+        cleanId,
+        cleanFullName,
+        normalizedEmail,
+        cleanRole,
+        cleanPhone,
+      }
+    };
+  }, [userId, fullName, email, role, phoneNumber]);
+
+  const isFormValid = validateFormDetails().valid;
+
+  // ---------------------------------------------------------------------------
+  // Stage B: ADD FACE — Initialize Camera, Check Liveness, Store in RAM
+  // ---------------------------------------------------------------------------
+  const handleAddFace = async () => {
+    if (isLoading || isProcessingRef.current) return;
+
+    const validation = validateFormDetails();
+    if (!validation.valid) {
       setStatusType("error");
-      setMessage("Please enter a valid phone number (at least 7 digits, e.g. +1 555-0123).");
+      setMessage(validation.error);
       return;
     }
+
+    const validDetails = validation.data;
+
+    // Reset previous capture states
+    if (capturedPreviewUrl) {
+      URL.revokeObjectURL(capturedPreviewUrl);
+      setCapturedPreviewUrl(null);
+    }
+    setIsFaceConfirmed(false);
 
     isProcessingRef.current = true;
     setIsLoading(true);
     setStatusType("loading");
-    setLivenessData(null);
-
-    // Step 1: Initializing Camera
-    setCurrentStage(1);
-    setMessage("Step 1/7: Initializing Camera & requesting secure video stream...");
+    setWorkflowState(WORKFLOW_STATES.CAMERA_READY);
+    setMessage("Initializing optical sensor & requesting secure webcam stream...");
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setStatusType("error");
-      setCurrentStage(1);
-      setMessage("Camera access is not supported by your browser or environment. Camera is strictly required.");
+      setWorkflowState(WORKFLOW_STATES.DETAILS_REQUIRED);
+      setMessage("Webcam access is not supported by your browser or environment. Camera is strictly required.");
       setIsLoading(false);
       isProcessingRef.current = false;
       return;
     }
 
-    // Stop any existing stream
     stopCamera();
 
-    let stream = null;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
+      const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           width: { ideal: 640 },
           height: { ideal: 480 },
-          facingMode: "user"
-        }
+          facingMode: "user",
+        },
       });
 
-      // Handle unexpected camera disconnect
       stream.getVideoTracks().forEach((track) => {
         track.addEventListener("ended", () => {
           if (isProcessingRef.current) {
@@ -130,7 +178,8 @@ function Registration() {
             setIsLoading(false);
             isProcessingRef.current = false;
             setStatusType("error");
-            setMessage("Camera connection was lost or disconnected. Registration attempt terminated.");
+            setWorkflowState(WORKFLOW_STATES.DETAILS_REQUIRED);
+            setMessage("Camera connection was interrupted or disconnected.");
           }
         });
       });
@@ -139,10 +188,8 @@ function Registration() {
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
       }
-      setCameraOn(true);
-      setMessage("Camera active. Please center your face directly within the reticle...");
+      setCameraActive(true);
 
-      // Wait for camera video feed to be ready and playing
       const video = videoRef.current;
       if (video) {
         await new Promise((resolve) => {
@@ -155,11 +202,10 @@ function Registration() {
         });
       }
 
-      // Sensor stabilization pause
-      await delay(600);
+      await delay(500);
 
       if (!video || !video.videoWidth || !video.videoHeight) {
-        throw new Error("Unable to read video frame from camera.");
+        throw new Error("Unable to read video frame from camera sensor.");
       }
 
       const canvas = document.createElement("canvas");
@@ -167,30 +213,30 @@ function Registration() {
       canvas.height = video.videoHeight;
       const ctx = canvas.getContext("2d");
 
-      // Initiate backend liveness session
+      // Step B.1: Backend-Issued Registration Liveness Session (TTL 5 minutes)
       const startFormData = new FormData();
       startFormData.append("action", "register");
-      startFormData.append("user_id", cleanId);
+      startFormData.append("user_id", validDetails.cleanId);
 
       const sessionStartResp = await fetch("http://127.0.0.1:8000/api/liveness/session/start", {
         method: "POST",
-        body: startFormData
+        body: startFormData,
       });
 
       const sessionStartData = await sessionStartResp.json();
       if (!sessionStartResp.ok || !sessionStartData.session?.session_id) {
-        throw new Error(sessionStartData.detail?.message || "Failed to start backend liveness session.");
+        throw new Error(sessionStartData.detail?.message || "Failed to initiate backend liveness session.");
       }
 
-      const sessionId = sessionStartData.session.session_id;
+      const activeSessionId = sessionStartData.session.session_id;
+      setSessionId(activeSessionId);
 
-      // Step 2: Checking Face Liveness on active live webcam frames
-      setCurrentStage(2);
-      setMessage("Step 2/7: Checking Face Liveness with MiniFASNet anti-spoofing engine...");
+      // Step B.2: Evaluate Live Anti-Spoofing Frames with MiniFASNet
+      setWorkflowState(WORKFLOW_STATES.CHECKING_LIVENESS);
+      setMessage("CHECKING LIVENESS: MiniFASNet anti-spoofing engine evaluating facial stream...");
 
       let isVerified = false;
-      let verifiedResult = null;
-      const maxLivenessAttempts = 10;
+      const maxLivenessAttempts = 15;
 
       for (let attempt = 1; attempt <= maxLivenessAttempts; attempt++) {
         if (!isProcessingRef.current) break;
@@ -205,191 +251,294 @@ function Registration() {
         }
 
         const verifyFormData = new FormData();
-        verifyFormData.append("session_id", sessionId);
+        verifyFormData.append("session_id", activeSessionId);
         verifyFormData.append("image", frameBlob, "live_frame.jpg");
 
         const verifyResp = await fetch("http://127.0.0.1:8000/api/liveness/session/verify-frame", {
           method: "POST",
-          body: verifyFormData
+          body: verifyFormData,
         });
 
         const verifyResult = await verifyResp.json();
 
         if (verifyResult.status === "no_face") {
-          setMessage(`Step 2/7: Position face in reticle (${attempt}/${maxLivenessAttempts}). Searching for subject...`);
+          setMessage(`Position face inside reticle (${attempt}/${maxLivenessAttempts}). Searching for subject...`);
           await delay(350);
           continue;
         }
 
         if (verifyResult.status === "fake" || (!verifyResult.is_real && verifyResult.label === "Fake")) {
-          // Liveness detection failed: reject attempt immediately. Do NOT capture or register face image.
+          // Reject spoofed, replayed, or invalid face captures immediately
+          stopCamera();
           setStatusType("error");
-          setCurrentStage(2);
-          setMessage("Liveness verification rejected: Synthetic or replay artifact detected. Please face the camera directly.");
-          setLivenessData(verifyResult);
+          setWorkflowState(WORKFLOW_STATES.DETAILS_REQUIRED);
+          setMessage("Liveness verification rejected: Synthetic or replay artifact detected. Real person required.");
           return;
         }
 
         if (verifyResult.verified || (verifyResult.is_real && verifyResult.score >= (verifyResult.threshold || 0.85))) {
           isVerified = true;
-          verifiedResult = verifyResult;
           break;
         }
 
-        setMessage(`Step 2/7: Analyzing live face stability (${attempt}/${maxLivenessAttempts}). Look directly at camera...`);
+        setMessage(`Analyzing live face stability (${attempt}/${maxLivenessAttempts}). Look directly at camera...`);
         await delay(300);
       }
 
       if (!isVerified) {
+        stopCamera();
         setStatusType("error");
-        setCurrentStage(2);
-        setMessage("Liveness verification timed out without confirming a live person. Registration rejected.");
+        setWorkflowState(WORKFLOW_STATES.DETAILS_REQUIRED);
+        setMessage("Liveness verification timed out without confirming an authentic live face.");
         return;
       }
 
-      // Step 3: Real Face Verified (No score percentage leaked)
-      setLivenessData(verifiedResult);
-      setCurrentStage(3);
-      setMessage("Step 3/7: Real Face Verified! Biometric authenticity confirmed.");
-      await delay(350);
+      // Step B.3: LIVE FACE DETECTED
+      setWorkflowState(WORKFLOW_STATES.LIVE_FACE_DETECTED);
+      setMessage("LIVE FACE DETECTED: Authentic live subject confirmed. Capturing biometric frame...");
+      await delay(400);
 
-      // Step 4: ONLY after successful liveness verification, capture face from active webcam
+      // Step B.4: Capture suitable face frame and store temporarily in backend RAM
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const verifiedFaceBlob = await new Promise((resolve) => {
+      const capturedBlob = await new Promise((resolve) => {
         canvas.toBlob(resolve, "image/jpeg", 0.95);
       });
 
-      if (!verifiedFaceBlob) {
-        throw new Error("Failed to capture verified face frame from active webcam.");
+      if (!capturedBlob) {
+        throw new Error("Failed to capture verified face frame.");
       }
 
-      setCurrentStage(4);
-      setMessage("Step 4/7: Detecting facial landmarks with MediaPipe BlazeFace...");
+      const captureFormData = new FormData();
+      captureFormData.append("session_id", activeSessionId);
+      captureFormData.append("user_id", validDetails.cleanId);
+      captureFormData.append("image", capturedBlob, "captured_face.jpg");
 
-      // Send to /register with verified session_id
-      const regFormData = new FormData();
-      regFormData.append("session_id", sessionId);
-      regFormData.append("user_id", cleanId);
-      regFormData.append("full_name", cleanFullName);
-      regFormData.append("email", normalizedEmail);
-      regFormData.append("role", cleanRole);
-      regFormData.append("phone_number", cleanPhone);
-      regFormData.append("image", verifiedFaceBlob, "webcam_verified_face.jpg");
-
-      const regResp = await fetch("http://127.0.0.1:8000/register", {
+      const captureResp = await fetch("http://127.0.0.1:8000/api/registration/session/capture-frame", {
         method: "POST",
-        body: regFormData
+        body: captureFormData,
       });
 
-      const regResult = await regResp.json();
-
-      if (!regResp.ok || regResult.status !== "success") {
-        setStatusType("error");
-        setCurrentStage(6);
-        const errMsg =
-          regResult.detail?.message ||
-          regResult.detail?.error ||
-          regResult.message ||
-          "Registration failed.";
-        setMessage(errMsg);
-        return;
+      const captureResult = await captureResp.json();
+      if (!captureResp.ok || captureResult.status !== "success") {
+        throw new Error(captureResult.detail?.message || "Failed to store captured face frame in backend RAM.");
       }
 
-      // Step 5: Generating Face Embedding
-      setCurrentStage(5);
-      setMessage("Step 5/7: Extracting 512-D L2-normalized FaceNet biometric vector...");
-      await delay(350);
+      // Stop camera after capture
+      stopCamera();
 
-      // Step 6: Processing Registration
-      setCurrentStage(6);
-      setMessage("Step 6/7: Storing profile record in PostgreSQL & synchronizing FAISS IndexFlatIP...");
-      await delay(350);
+      // Display the captured face preview on the registration page (in-memory object URL)
+      const previewUrl = URL.createObjectURL(capturedBlob);
+      setCapturedPreviewUrl(previewUrl);
 
-      // Step 7: Completed
-      setCurrentStage(7);
-      setStatusType("success");
-      setMessage(regResult.message || `Identity verified and enrolled: ${cleanFullName} (${cleanId}).`);
+      // Transition to Stage C: AWAITING CONFIRMATION
+      setWorkflowState(WORKFLOW_STATES.AWAITING_CONFIRMATION);
+      setStatusType("idle");
+      setMessage("FACE CAPTURED in temporary RAM. Review preview and click CONFIRM FACE to enable registration.");
     } catch (err) {
+      stopCamera();
       setStatusType("error");
-      if (currentStage < 2) setCurrentStage(1);
-
+      setWorkflowState(WORKFLOW_STATES.DETAILS_REQUIRED);
       if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
-        setMessage("Camera permission was denied. Please allow camera permissions in your browser to proceed.");
-      } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
-        setMessage("No video capture hardware detected on this workstation.");
-      } else if (err.name === "NotReadableError" || err.name === "TrackStartError") {
-        setMessage("Camera device is locked by another process or unavailable.");
-      } else if (err.name === "OverconstrainedError") {
-        setMessage("Camera hardware cannot support the requested video resolution.");
+        setMessage("Camera permission was denied. Please allow camera permissions to proceed.");
       } else if (err.message && err.message.includes("fetch")) {
         setMessage("Backend connection refused. Ensure the OJIX FastAPI server is active.");
       } else {
-        setMessage(err.message || "An unexpected error occurred during biometric registration.");
+        setMessage(err.message || "An unexpected error occurred during face capture.");
       }
     } finally {
-      stopCamera();
       setIsLoading(false);
       isProcessingRef.current = false;
     }
   };
 
-  // Viewfinder dynamic status indicator
-  const getViewfinderStatus = () => {
-    if (!cameraOn) {
-      return { text: "Sensor Idle", dotClass: "status-dot" };
+  // ---------------------------------------------------------------------------
+  // Stage C: CONFIRM FACE — Accept captured frame and enable registration
+  // ---------------------------------------------------------------------------
+  const handleConfirmFace = async () => {
+    if (!sessionId || isLoading) return;
+
+    try {
+      setIsLoading(true);
+      setStatusType("loading");
+      setMessage("Confirming biometric capture with backend session...");
+
+      const confirmFormData = new FormData();
+      confirmFormData.append("session_id", sessionId);
+      confirmFormData.append("user_id", userId.trim());
+
+      const resp = await fetch("http://127.0.0.1:8000/api/registration/session/confirm", {
+        method: "POST",
+        body: confirmFormData,
+      });
+
+      const result = await resp.json();
+      if (!resp.ok || result.status !== "success") {
+        throw new Error(result.detail?.message || "Failed to confirm face capture.");
+      }
+
+      stopCamera();
+      setIsFaceConfirmed(true);
+      setStatusType("success");
+      setWorkflowState(WORKFLOW_STATES.AWAITING_CONFIRMATION);
+      setMessage("FACE CAPTURE CONFIRMED: Ready to enroll user. Click REGISTER USER to complete enrollment.");
+    } catch (err) {
+      setStatusType("error");
+      setMessage(err.message || "Confirmation failed.");
+    } finally {
+      setIsLoading(false);
     }
-    if (currentStage === 3 || statusType === "success") {
-      return { text: "Subject Verified", dotClass: "status-dot status-dot-verified" };
-    }
-    if (statusType === "error") {
-      return { text: "Verification Rejected", dotClass: "status-dot status-dot-denied" };
-    }
-    if (currentStage >= 1 && currentStage < 3) {
-      return { text: "Liveness Engine Active", dotClass: "status-dot status-dot-scanning" };
-    }
-    return { text: "Live Video Feed", dotClass: "status-dot status-dot-cyan" };
   };
 
-  const vStatus = getViewfinderStatus();
+  // ---------------------------------------------------------------------------
+  // Stage C: RETAKE — Discard temporary capture, restart camera and verify again
+  // ---------------------------------------------------------------------------
+  const handleRetake = async () => {
+    if (isLoading) return;
+
+    // Discard previous temporary capture
+    if (capturedPreviewUrl) {
+      URL.revokeObjectURL(capturedPreviewUrl);
+      setCapturedPreviewUrl(null);
+    }
+    setIsFaceConfirmed(false);
+
+    if (sessionId) {
+      try {
+        const retakeFormData = new FormData();
+        retakeFormData.append("session_id", sessionId);
+        retakeFormData.append("user_id", userId.trim());
+
+        await fetch("http://127.0.0.1:8000/api/registration/session/retake", {
+          method: "POST",
+          body: retakeFormData,
+        });
+      } catch {
+        // ignore network error on retake
+      }
+    }
+
+    // Restart the camera and perform liveness verification again
+    handleAddFace();
+  };
+
+  // ---------------------------------------------------------------------------
+  // Stage D: REGISTER USER — Commit Profile, Extract Embedding & Sync FAISS
+  // ---------------------------------------------------------------------------
+  const handleRegisterUser = async () => {
+    if (!isFaceConfirmed || !sessionId || isLoading) return;
+
+    const validation = validateFormDetails();
+    if (!validation.valid) {
+      setStatusType("error");
+      setMessage(validation.error);
+      return;
+    }
+
+    const validDetails = validation.data;
+
+    try {
+      setIsLoading(true);
+      setStatusType("loading");
+      setWorkflowState(WORKFLOW_STATES.REGISTERING);
+      setMessage("REGISTERING: BlazeFace landmark alignment, FaceNet 512-D embedding extraction, and atomic PostgreSQL commit...");
+
+      const regFormData = new FormData();
+      regFormData.append("session_id", sessionId);
+      regFormData.append("user_id", validDetails.cleanId);
+      regFormData.append("full_name", validDetails.cleanFullName);
+      regFormData.append("email", validDetails.normalizedEmail);
+      regFormData.append("role", validDetails.cleanRole);
+      regFormData.append("phone_number", validDetails.cleanPhone);
+
+      const resp = await fetch("http://127.0.0.1:8000/register", {
+        method: "POST",
+        body: regFormData,
+      });
+
+      const result = await resp.json();
+
+      if (!resp.ok || result.status !== "success") {
+        const errMsg =
+          result.detail?.message ||
+          result.detail?.error ||
+          result.message ||
+          "Registration failed.";
+        throw new Error(errMsg);
+      }
+
+      setWorkflowState(WORKFLOW_STATES.REGISTRATION_SUCCESSFUL);
+      setStatusType("success");
+
+      let successMsg = `Identity enrolled successfully: ${validDetails.cleanFullName} (${validDetails.cleanId}).`;
+      if (result.indexing_status === "reconciliation_pending" || result.faiss_synced === false) {
+        successMsg += " (Note: FAISS index reconciliation is pending).";
+      }
+      setMessage(successMsg);
+    } catch (err) {
+      setStatusType("error");
+      setWorkflowState(WORKFLOW_STATES.AWAITING_CONFIRMATION);
+      setMessage(err.message || "Registration transaction failed.");
+    } finally {
+      setIsLoading(false);
+      stopCamera();
+    }
+  };
+
+  // Dynamic status bar indicator
+  const getViewfinderStatusBar = () => {
+    switch (workflowState) {
+      case WORKFLOW_STATES.CAMERA_READY:
+        return { text: "Sensor Initialized", dotClass: "status-dot status-dot-cyan" };
+      case WORKFLOW_STATES.CHECKING_LIVENESS:
+        return { text: "Checking Face Liveness", dotClass: "status-dot status-dot-scanning" };
+      case WORKFLOW_STATES.LIVE_FACE_DETECTED:
+        return { text: "Live Face Confirmed", dotClass: "status-dot status-dot-verified" };
+      case WORKFLOW_STATES.FACE_CAPTURED:
+      case WORKFLOW_STATES.AWAITING_CONFIRMATION:
+        return {
+          text: isFaceConfirmed ? "Face Capture Confirmed" : "Face Captured — Review Preview",
+          dotClass: isFaceConfirmed ? "status-dot status-dot-verified" : "status-dot status-dot-scanning"
+        };
+      case WORKFLOW_STATES.REGISTERING:
+        return { text: "Registering Profile & Embedding", dotClass: "status-dot status-dot-scanning" };
+      case WORKFLOW_STATES.REGISTRATION_SUCCESSFUL:
+        return { text: "Registration Successful", dotClass: "status-dot status-dot-verified" };
+      default:
+        return { text: "Sensor Standby", dotClass: "status-dot" };
+    }
+  };
+
+  const vStatus = getViewfinderStatusBar();
+
+  // Helper to determine active stage
+  const getCurrentStageId = () => {
+    if (workflowState === WORKFLOW_STATES.DETAILS_REQUIRED) return 1;
+    if ([WORKFLOW_STATES.CAMERA_READY, WORKFLOW_STATES.CHECKING_LIVENESS, WORKFLOW_STATES.LIVE_FACE_DETECTED, WORKFLOW_STATES.FACE_CAPTURED].includes(workflowState)) return 2;
+    if (workflowState === WORKFLOW_STATES.AWAITING_CONFIRMATION) return 3;
+    if ([WORKFLOW_STATES.REGISTERING, WORKFLOW_STATES.REGISTRATION_SUCCESSFUL].includes(workflowState)) return 4;
+    return 1;
+  };
+
+  const currentStageId = getCurrentStageId();
 
   return (
     <div className="registration-container">
-      {/* Header Description */}
-      <div className="registration-header">
-        <h2>
-          <span>Biometric Identity Registration</span>
-          <span className="badge badge-cyber badge-mono">ENROLLMENT PORTAL</span>
-        </h2>
-        <p>
-          Complete user credentials and initiate live biometric verification. Liveness detection is enforced prior to embedding extraction.
-        </p>
-      </div>
-
-      {/* Two-Column Responsive Grid */}
-      <div className="registration-grid">
-        {/* Left Column: Profile Form */}
-        <div className="reg-form-panel">
-          <div className="reg-form-title">
-            <span>Identity Credentials</span>
+      {/* Two-Column Responsive Layout */}
+      <div className="registration-two-col">
+        {/* Left Column: User Details & Dedicated ADD FACE Section */}
+        <div className="reg-left-panel">
+          <div className="reg-panel-header">
+            <div className="reg-heading-group">
+              <h2 className="reg-main-heading">USER REGISTRATION</h2>
+              <p className="reg-sub-heading">
+                Two-Stage Biometric Profile Enrollment
+              </p>
+            </div>
+            <span className="workflow-badge badge-mono">{workflowState}</span>
           </div>
 
+          {/* Form Fields: Full Name, User ID, Work Email, Phone Number, Role */}
           <div className="reg-form-fields">
-            <div className="field-group">
-              <label className="cyber-label">
-                <span>User ID <span className="required-star">*</span></span>
-                <span className="field-hint">Unique alphanumeric</span>
-              </label>
-              <input
-                type="text"
-                className="cyber-input cyber-input-mono"
-                placeholder="e.g. john_doe"
-                value={userId}
-                onChange={(e) => setUserId(e.target.value)}
-                disabled={isLoading}
-                autoComplete="off"
-              />
-            </div>
-
             <div className="field-group">
               <label className="cyber-label">
                 <span>Full Name <span className="required-star">*</span></span>
@@ -398,40 +547,43 @@ function Registration() {
               <input
                 type="text"
                 className="cyber-input"
-                placeholder="e.g. John Doe"
+                placeholder="e.g. Jacqueline Miller"
                 value={fullName}
                 onChange={(e) => setFullName(e.target.value)}
-                disabled={isLoading}
+                disabled={isLoading || workflowState === WORKFLOW_STATES.REGISTRATION_SUCCESSFUL}
+                autoComplete="name"
+              />
+            </div>
+
+            <div className="field-group">
+              <label className="cyber-label">
+                <span>User ID <span className="required-star">*</span></span>
+                <span className="field-hint">Unique alphanumeric</span>
+              </label>
+              <input
+                type="text"
+                className="cyber-input cyber-input-mono"
+                placeholder="e.g. j_miller"
+                value={userId}
+                onChange={(e) => setUserId(e.target.value)}
+                disabled={isLoading || workflowState === WORKFLOW_STATES.REGISTRATION_SUCCESSFUL}
+                autoComplete="off"
               />
             </div>
 
             <div className="field-group">
               <label className="cyber-label">
                 <span>Work Email <span className="required-star">*</span></span>
-                <span className="field-hint">Corporate domain</span>
+                <span className="field-hint">Corporate address</span>
               </label>
               <input
                 type="email"
                 className="cyber-input"
-                placeholder="e.g. john.doe@company.com"
+                placeholder="e.g. j.miller@cybercorp.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                disabled={isLoading}
-              />
-            </div>
-
-            <div className="field-group">
-              <label className="cyber-label">
-                <span>Role / Designation <span className="required-star">*</span></span>
-                <span className="field-hint">Access tier</span>
-              </label>
-              <input
-                type="text"
-                className="cyber-input"
-                placeholder="e.g. Senior Security Architect"
-                value={role}
-                onChange={(e) => setRole(e.target.value)}
-                disabled={isLoading}
+                disabled={isLoading || workflowState === WORKFLOW_STATES.REGISTRATION_SUCCESSFUL}
+                autoComplete="email"
               />
             </div>
 
@@ -443,116 +595,127 @@ function Registration() {
               <input
                 type="tel"
                 className="cyber-input cyber-input-mono"
-                placeholder="e.g. +1 555-0123"
+                placeholder="e.g. +1 555-0199"
                 value={phoneNumber}
                 onChange={(e) => setPhoneNumber(e.target.value)}
-                disabled={isLoading}
+                disabled={isLoading || workflowState === WORKFLOW_STATES.REGISTRATION_SUCCESSFUL}
+                autoComplete="tel"
+              />
+            </div>
+
+            <div className="field-group">
+              <label className="cyber-label">
+                <span>Role / Designation <span className="required-star">*</span></span>
+                <span className="field-hint">Access tier</span>
+              </label>
+              <input
+                type="text"
+                className="cyber-input"
+                placeholder="e.g. Lead Cryptanalyst"
+                value={role}
+                onChange={(e) => setRole(e.target.value)}
+                disabled={isLoading || workflowState === WORKFLOW_STATES.REGISTRATION_SUCCESSFUL}
               />
             </div>
           </div>
 
-          <button
-            onClick={handleRegisterClick}
-            disabled={isLoading}
-            className="btn btn-primary btn-register-submit"
-          >
-            {isLoading ? (
-              <>
-                <span className="status-dot status-dot-scanning"></span>
-                <span>Enrolling Biometric Profile...</span>
-              </>
-            ) : (
-              <span>Start Live Camera Enrollment</span>
-            )}
-          </button>
-        </div>
-
-        {/* Right Column: Viewfinder & Pipeline Stepper */}
-        <div className="reg-viewfinder-panel">
-          {/* Cyber Biometric Viewfinder */}
-          <div
-            className={`cyber-viewfinder ${cameraOn ? "camera-active" : ""} ${
-              currentStage === 3 || statusType === "success" ? "liveness-verified" : ""
-            } ${statusType === "error" ? "liveness-failed" : ""}`}
-          >
-            {/* Viewfinder Status Overlay */}
-            <div className="viewfinder-status-bar">
-              <span className={vStatus.dotClass}></span>
-              <span>{vStatus.text}</span>
-            </div>
-
-            {/* Corner Reticle Brackets */}
-            <div className="reticle-corner top-left"></div>
-            <div className="reticle-corner top-right"></div>
-            <div className="reticle-corner bottom-left"></div>
-            <div className="reticle-corner bottom-right"></div>
-
-            {/* Centered Face Alignment Target */}
-            <div className="face-alignment-oval">
-              <span>Align Face</span>
-            </div>
-
-            {/* Active Webcam Video Stream */}
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="cyber-video-stream"
-              style={{ display: cameraOn ? "block" : "none" }}
-            />
-
-            {/* Idle Placeholder when camera is inactive */}
-            {!cameraOn && (
-              <div className="viewfinder-idle-state">
-                <div className="viewfinder-idle-icon">📷</div>
-                <div className="viewfinder-idle-text">Optical Sensor Standby</div>
-                <div className="viewfinder-idle-subtext">
-                  Camera will activate automatically upon initiating enrollment.
+          {/* Dedicated ADD FACE Section */}
+          <div className="dedicated-add-face-section">
+            <div className="add-face-header-bar">
+              <span className="add-face-section-title">BIOMETRIC FACE CAPTURE</span>
+              {isFaceConfirmed && (
+                <div className="face-confirmed-pill">
+                  <span className="confirmed-check-symbol">✓</span>
+                  <span className="confirmed-status-text">FACE CAPTURE CONFIRMED</span>
                 </div>
+              )}
+            </div>
+
+            {/* Interaction States */}
+            {!capturedPreviewUrl && !isFaceConfirmed && (
+              <div className="add-face-unconfirmed-box">
+                <button
+                  type="button"
+                  onClick={handleAddFace}
+                  disabled={isLoading || cameraActive || workflowState === WORKFLOW_STATES.REGISTRATION_SUCCESSFUL}
+                  className="btn btn-primary btn-add-face"
+                >
+                  {cameraActive ? (
+                    <>
+                      <span className="status-dot status-dot-scanning"></span>
+                      <span>Sensor Active &bull; Verifying Liveness...</span>
+                    </>
+                  ) : (
+                    <span>📷 ADD FACE</span>
+                  )}
+                </button>
+                <div className="face-neutral-status">
+                  <span className="status-dot"></span>
+                  <span>Biometric Capture Required</span>
+                </div>
+              </div>
+            )}
+
+            {/* Stage C: Captured preview awaiting confirmation */}
+            {capturedPreviewUrl && !isFaceConfirmed && (
+              <div className="add-face-review-box">
+                <button
+                  type="button"
+                  onClick={handleConfirmFace}
+                  disabled={isLoading}
+                  className="btn btn-primary btn-confirm-face"
+                >
+                  <span>CONFIRM FACE</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleRetake}
+                  disabled={isLoading}
+                  className="btn btn-outline btn-retake"
+                >
+                  <span>🔄 RETAKE</span>
+                </button>
+              </div>
+            )}
+
+            {/* Face confirmed state actions */}
+            {isFaceConfirmed && workflowState !== WORKFLOW_STATES.REGISTRATION_SUCCESSFUL && (
+              <div className="add-face-confirmed-box">
+                <button
+                  type="button"
+                  onClick={handleRetake}
+                  disabled={isLoading}
+                  className="btn btn-outline btn-retake-sm"
+                >
+                  <span>🔄 Retake Face Capture</span>
+                </button>
               </div>
             )}
           </div>
 
-          {/* 7-Stage Technical Pipeline Stepper */}
-          {currentStage > 0 && (
-            <div className="reg-stepper-panel">
-              <div className="stepper-header">
-                <span className="stepper-header-title">Enrollment Pipeline</span>
-                <span className="badge badge-cyber badge-mono">
-                  STAGE {currentStage} OF 7
-                </span>
-              </div>
+          {/* Primary Action Button: REGISTER USER (Disabled until details & confirmed) */}
+          <button
+            type="button"
+            onClick={handleRegisterUser}
+            disabled={!isFaceConfirmed || !isFormValid || isLoading || workflowState === WORKFLOW_STATES.REGISTRATION_SUCCESSFUL}
+            className={`btn btn-register-submit ${isFaceConfirmed && isFormValid ? "btn-primary btn-ready" : "btn-disabled"}`}
+          >
+            {isLoading && workflowState === WORKFLOW_STATES.REGISTERING ? (
+              <>
+                <span className="status-dot status-dot-scanning"></span>
+                <span>Enrolling Profile &amp; Embedding...</span>
+              </>
+            ) : (
+              <span>REGISTER USER</span>
+            )}
+          </button>
 
-              <div className="stepper-step-list">
-                {REGISTRATION_STAGES.map((st) => {
-                  const isPast = currentStage > st.id;
-                  const isCurrent = currentStage === st.id;
-                  const isFailed = isCurrent && statusType === "error";
-
-                  let stateClass = "pending";
-                  let indicatorText = `${st.id}`;
-
-                  if (isPast || (isCurrent && statusType === "success")) {
-                    stateClass = "completed";
-                    indicatorText = "✓";
-                  } else if (isFailed) {
-                    stateClass = "failed";
-                    indicatorText = "✕";
-                  } else if (isCurrent) {
-                    stateClass = "active";
-                    indicatorText = "●";
-                  }
-
-                  return (
-                    <div key={st.id} className={`stepper-step-item ${stateClass}`}>
-                      <span className="step-indicator">{indicatorText}</span>
-                      <span className="step-label">{st.label}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+          {/* Form helper note if incomplete */}
+          {(!isFaceConfirmed || !isFormValid) && workflowState !== WORKFLOW_STATES.REGISTRATION_SUCCESSFUL && (
+            <span className="button-state-note">
+              * Valid user details and confirmed biometric face capture are required to enable registration.
+            </span>
           )}
 
           {/* Feedback & Alert Box */}
@@ -570,17 +733,121 @@ function Registration() {
                 {statusType === "error" && "⚠️"}
                 {statusType === "success" && "✓"}
                 {statusType === "loading" && "●"}
+                {statusType === "idle" && "ℹ️"}
               </div>
               <div className="feedback-content">
                 <div>{message}</div>
-                {livenessData && (
+                {sessionId && (
                   <div className="feedback-meta">
-                    Liveness Engine: {livenessData.label || livenessData.status} (Verified)
+                    Session: {sessionId} (In-Memory RAM Storage)
                   </div>
                 )}
               </div>
             </div>
           )}
+        </div>
+
+        {/* Right Column: Camera Viewfinder & Pipeline Stepper */}
+        <div className="reg-right-panel">
+          {/* Cyber Biometric Viewfinder */}
+          <div
+            className={`cyber-viewfinder ${cameraActive ? "camera-active" : ""} ${
+              isFaceConfirmed || workflowState === WORKFLOW_STATES.REGISTRATION_SUCCESSFUL ? "liveness-verified" : ""
+            } ${statusType === "error" ? "liveness-failed" : ""}`}
+          >
+            {/* Viewfinder Status Overlay */}
+            <div className="viewfinder-status-bar">
+              <span className={vStatus.dotClass}></span>
+              <span>{vStatus.text}</span>
+            </div>
+
+            {/* Corner Reticle Brackets */}
+            <div className="reticle-corner top-left"></div>
+            <div className="reticle-corner top-right"></div>
+            <div className="reticle-corner bottom-left"></div>
+            <div className="reticle-corner bottom-right"></div>
+
+            {/* Active Webcam Video Stream */}
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="cyber-video-stream"
+              style={{ display: cameraActive ? "block" : "none" }}
+            />
+
+            {/* Centered Face Alignment Target */}
+            {cameraActive && (
+              <div className="face-alignment-oval">
+                <span>Align Face</span>
+              </div>
+            )}
+
+            {/* Captured Face Preview (In-memory Object URL) */}
+            {capturedPreviewUrl && !cameraActive && (
+              <div className="captured-preview-container">
+                <img
+                  src={capturedPreviewUrl}
+                  alt="Captured biometric preview"
+                  className="captured-face-preview"
+                />
+                <div className="preview-overlay-badge">
+                  {isFaceConfirmed ? "CONFIRMED CAPTURE" : "TEMPORARY RAM CAPTURE"}
+                </div>
+              </div>
+            )}
+
+            {/* Idle Placeholder when camera is inactive and no preview */}
+            {!cameraActive && !capturedPreviewUrl && (
+              <div className="viewfinder-idle-state">
+                <div className="viewfinder-idle-icon">📷</div>
+                <div className="viewfinder-idle-text">Optical Sensor Standby</div>
+                <div className="viewfinder-idle-subtext">
+                  Complete user details and click <strong>ADD FACE</strong> to initialize camera stream.
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* 4-Stage Architectural Pipeline Stepper */}
+          <div className="reg-stepper-panel">
+            <div className="stepper-header">
+              <span className="stepper-header-title">Registration Workflow</span>
+              <span className="badge badge-cyber badge-mono">
+                STAGE {currentStageId} OF 4
+              </span>
+            </div>
+
+            <div className="stepper-step-list">
+              {PIPELINE_STAGES.map((st) => {
+                const isPast = currentStageId > st.id;
+                const isCurrent = currentStageId === st.id;
+                const isFailed = isCurrent && statusType === "error";
+
+                let stateClass = "pending";
+                let indicatorText = `${st.id}`;
+
+                if (isPast || (isCurrent && workflowState === WORKFLOW_STATES.REGISTRATION_SUCCESSFUL)) {
+                  stateClass = "completed";
+                  indicatorText = "✓";
+                } else if (isFailed) {
+                  stateClass = "failed";
+                  indicatorText = "✕";
+                } else if (isCurrent) {
+                  stateClass = "active";
+                  indicatorText = "●";
+                }
+
+                return (
+                  <div key={st.id} className={`stepper-step-item ${stateClass}`}>
+                    <span className="step-indicator">{indicatorText}</span>
+                    <span className="step-label">{st.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         </div>
       </div>
     </div>

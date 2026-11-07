@@ -2,6 +2,7 @@ import os
 import sys
 import threading
 import re
+from contextlib import asynccontextmanager
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -26,7 +27,10 @@ from user_service import (
     UserNotFoundError
 )
 from liveness_service import get_liveness_service, get_liveness_threshold
-from liveness_session import get_liveness_session_manager
+from liveness_session import (
+    get_liveness_session_manager,
+    RegistrationCapacityExceededError
+)
 
 # Folder to store cropped faces
 CROPPED_FACES_DIR = os.path.join(BASE_DIR, "cropped_faces")
@@ -48,23 +52,15 @@ options = FaceDetectorOptions(
 detector = FaceDetector.create_from_options(options)
 print("BlazeFace initialized successfully!")
 
-app = FastAPI(title="Biometric Face Recognition API")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-@app.on_event("startup")
-def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     """
-    On FastAPI server startup:
+    FastAPI lifespan context manager:
     1. Initialize in-memory FAISS IndexFlatIP(512) from PostgreSQL.
     2. Initialize MiniFASNetV1SE liveness model (fail-closed security).
+    3. Start the periodic background session cleanup task (every 60s).
+    4. Cleanly stop background cleanup task on shutdown.
     """
     try:
         from faiss_service import get_faiss_manager
@@ -83,6 +79,25 @@ def startup_event():
     except Exception as e:
         print(f"[STARTUP CRITICAL] Could not initialize liveness service: {e}")
 
+    session_mgr = get_liveness_session_manager()
+    session_mgr.start_background_cleanup()
+
+    try:
+        yield
+    finally:
+        await session_mgr.stop_background_cleanup()
+
+
+app = FastAPI(title="Biometric Face Recognition API", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.get("/")
 def home():
@@ -99,39 +114,51 @@ def _process_registration_sync(
     email: str | None,
     role: str | None,
     phone_number: str | None,
-    img: np.ndarray
+    img: np.ndarray,
+    session_info: dict | None = None
 ) -> dict:
     """
     Synchronous worker executed in worker threadpool enforcing Liveness-First registration:
-    Step 2: MiniFASNetV1SE face anti-spoofing liveness check.
+    Step 2: MiniFASNetV1SE face anti-spoofing liveness check (or verified session evaluation).
             Rejects fake, replay, uncertain, or low-confidence inputs immediately.
-    Step 3: Exact verified frame retained upon REAL confirmation.
+    Step 3: Exact verified frame retained upon REAL confirmation (in RAM).
     Step 4: MediaPipe BlazeFace face detection and cropping.
     Step 5: FaceNet 512-D embedding extraction via shared pipeline.
     Step 6: PostgreSQL atomic persistence and FAISS IndexFlatIP synchronization.
     """
     # --------------------------------------------------------------------------
-    # Step 2: MiniFASNet Liveness Detection
+    # Step 2: MiniFASNet Liveness Verification Check
     # --------------------------------------------------------------------------
-    liveness_svc = get_liveness_service()
-    liveness_res = liveness_svc.verify_liveness(img)
-
-    if liveness_res.get("status") == "no_face":
-        return {
-            "status": "no_face",
-            "message": "No face detected in camera frame. Please align your face with the camera.",
-            "liveness": liveness_res
+    if session_info and session_info.get("is_verified"):
+        # Verified live webcam session pre-validated by backend
+        liveness_res = {
+            "status": "real",
+            "is_real": True,
+            "score": session_info.get("verified_score", 1.0),
+            "threshold": 0.85,
+            "label": "Real",
+            "message": "Real face verified via active liveness session."
         }
+    else:
+        liveness_svc = get_liveness_service()
+        liveness_res = liveness_svc.verify_liveness(img)
 
-    if not liveness_res.get("is_real", False):
-        return {
-            "status": "liveness_failed",
-            "message": liveness_res.get("message", "Liveness check failed: Real face could not be verified."),
-            "liveness": liveness_res
-        }
+        if liveness_res.get("status") == "no_face":
+            return {
+                "status": "no_face",
+                "message": "No face detected in camera frame. Please align your face with the camera.",
+                "liveness": liveness_res
+            }
+
+        if not liveness_res.get("is_real", False):
+            return {
+                "status": "liveness_failed",
+                "message": liveness_res.get("message", "Liveness check failed: Real face could not be verified."),
+                "liveness": liveness_res
+            }
 
     # --------------------------------------------------------------------------
-    # Step 3: Capture / Retain Verified Image (exact frame that passed liveness)
+    # Step 3: Verified Image in memory
     # --------------------------------------------------------------------------
     verified_img = img
 
@@ -185,7 +212,7 @@ def _process_registration_sync(
             face_bgr=cropped_face
         )
     except Exception as reg_err:
-        # Avoid partial registration: remove cropped face image if DB insertion or FAISS sync failed
+        # Avoid partial registration: remove cropped face image if DB insertion failed
         if os.path.exists(output_path):
             try:
                 os.remove(output_path)
@@ -195,7 +222,7 @@ def _process_registration_sync(
 
     return {
         "status": "success",
-        "message": "Real face verified, embedding generated, and user profile registered successfully",
+        "message": reg_result.get("message", "Real face verified, embedding generated, and user profile registered successfully"),
         "user_id": clean_user_id,
         "full_name": reg_result.get("full_name", ""),
         "email": reg_result.get("email", ""),
@@ -204,6 +231,8 @@ def _process_registration_sync(
         "saved_image": output_path,
         "embedding_dimension": reg_result["embedding_dimension"],
         "created_at": reg_result["created_at"],
+        "faiss_synced": reg_result.get("faiss_synced", True),
+        "indexing_status": reg_result.get("indexing_status", "synced"),
         "liveness": liveness_res
     }
 
@@ -226,7 +255,13 @@ async def start_liveness_session_endpoint(
 
     clean_user = user_id.strip() if user_id and user_id.strip() else None
     session_mgr = get_liveness_session_manager()
-    session = session_mgr.create_session(action=clean_action, user_id=clean_user)
+    try:
+        session = session_mgr.create_session(action=clean_action, user_id=clean_user)
+    except RegistrationCapacityExceededError as cap_err:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"error": "registration_capacity_exceeded", "message": str(cap_err)}
+        )
 
     return {
         "status": "success",
@@ -286,7 +321,11 @@ async def verify_liveness_frame_endpoint(
     liveness_svc = get_liveness_service()
     liveness_res = await run_in_threadpool(liveness_svc.verify_liveness, img)
 
-    is_verified, msg, session_dict = session_mgr.record_verification_result(clean_session_id, liveness_res)
+    is_verified, msg, session_dict = session_mgr.record_verification_result(
+        clean_session_id,
+        liveness_res,
+        verified_frame=img if liveness_res.get("is_real", False) else None
+    )
 
     return {
         "status": liveness_res.get("status"),
@@ -300,6 +339,188 @@ async def verify_liveness_frame_endpoint(
     }
 
 
+@app.post("/api/registration/session/capture-frame")
+@app.post("/api/liveness/session/capture-frame")
+async def capture_frame_endpoint(
+    session_id: str = Form(...),
+    user_id: str = Form(...),
+    image: UploadFile | None = File(None)
+):
+    """
+    Stage B: Stores a verified face frame in temporary backend RAM.
+    Does NOT write to disk, does NOT call FaceNet, and does NOT mutate PostgreSQL.
+    Strictly verifies that session is active and has passed liveness.
+    """
+    clean_session_id = session_id.strip() if session_id else ""
+    clean_user_id = user_id.strip() if user_id else ""
+    session_mgr = get_liveness_session_manager()
+
+    session = session_mgr.get_session(clean_session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "session_not_found", "message": "Registration session not found or expired. Please restart the camera."}
+        )
+
+    if session.is_expired():
+        session.clear_temp_frames()
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail={"error": "session_expired", "message": "Registration session has expired. Please restart the camera."}
+        )
+
+    if session.is_consumed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "session_consumed", "message": "Registration session was already consumed."}
+        )
+
+    if not session.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "not_verified", "message": "Face must successfully pass liveness verification before capture."}
+        )
+
+    if session.user_id and session.user_id != clean_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": "user_mismatch", "message": f"Session belongs to '{session.user_id}', not '{clean_user_id}'."}
+        )
+
+    frame_img: np.ndarray | None = None
+    if image is not None:
+        image_data = await image.read()
+        if image_data:
+            np_array = np.frombuffer(image_data, np.uint8)
+            frame_img = cv2.imdecode(np_array, cv2.IMREAD_COLOR)
+
+    if frame_img is not None and frame_img.size > 0:
+        success, msg, s_dict = session_mgr.store_temp_frame(
+            session_id=clean_session_id,
+            frame=frame_img,
+            user_id=clean_user_id
+        )
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "capture_failed", "message": msg}
+            )
+        return {
+            "status": "success",
+            "message": msg,
+            "session": s_dict
+        }
+
+    # If image file was not uploaded, check if session already holds verified frame
+    if session._last_verified_frame is not None:
+        success, msg, s_dict = session_mgr.store_temp_frame(
+            session_id=clean_session_id,
+            frame=session._last_verified_frame,
+            user_id=clean_user_id
+        )
+        if success:
+            return {
+                "status": "success",
+                "message": "Verified face frame held in temporary RAM.",
+                "session": s_dict
+            }
+
+    if not session.temp_frames:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "no_frame", "message": "No valid face frame provided or available in session."}
+        )
+
+    return {
+        "status": "success",
+        "message": "Verified face frame held in temporary RAM.",
+        "session": session.to_dict()
+    }
+
+
+@app.post("/api/registration/session/confirm")
+@app.post("/api/liveness/session/confirm")
+async def confirm_face_endpoint(
+    session_id: str = Form(...),
+    user_id: str = Form(...)
+):
+    """
+    Stage C: Confirms the captured face frame in RAM, enabling the Register User action.
+    """
+    clean_session_id = session_id.strip() if session_id else ""
+    clean_user_id = user_id.strip() if user_id else ""
+    session_mgr = get_liveness_session_manager()
+
+    success, msg, s_dict = session_mgr.confirm_capture(
+        session_id=clean_session_id,
+        user_id=clean_user_id
+    )
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "confirmation_failed", "message": msg}
+        )
+
+    return {
+        "status": "success",
+        "message": msg,
+        "session": s_dict
+    }
+
+
+@app.post("/api/registration/session/retake")
+@app.post("/api/liveness/session/retake")
+async def retake_face_endpoint(
+    session_id: str = Form(...),
+    user_id: str = Form(...)
+):
+    """
+    Stage C: Discards previously captured temporary face frames from RAM and resets liveness state.
+    """
+    clean_session_id = session_id.strip() if session_id else ""
+    clean_user_id = user_id.strip() if user_id else ""
+    session_mgr = get_liveness_session_manager()
+
+    success, msg, s_dict = session_mgr.retake_capture(
+        session_id=clean_session_id,
+        user_id=clean_user_id
+    )
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "retake_failed", "message": msg}
+        )
+
+    return {
+        "status": "success",
+        "message": msg,
+        "session": s_dict
+    }
+
+
+@app.post("/api/registration/session/cancel")
+@app.post("/api/liveness/session/cancel")
+async def cancel_session_endpoint(
+    session_id: str = Form(...),
+    user_id: str | None = Form(None)
+):
+    """
+    Cancels registration and purges all temporary frames from memory immediately.
+    """
+    clean_session_id = session_id.strip() if session_id else ""
+    clean_user_id = user_id.strip() if user_id else None
+    session_mgr = get_liveness_session_manager()
+
+    success, msg = session_mgr.cancel_session(
+        session_id=clean_session_id,
+        user_id=clean_user_id
+    )
+    return {
+        "status": "success" if success else "not_found",
+        "message": msg
+    }
+
+
 @app.post("/register")
 async def register_user_endpoint(
     session_id: str = Form(...),
@@ -308,33 +529,37 @@ async def register_user_endpoint(
     email: str | None = Form(None),
     role: str | None = Form(None),
     phone_number: str | None = Form(None),
-    image: UploadFile = File(...)
+    image: UploadFile | None = File(None)
 ):
     """
-    Registration endpoint:
-    Enforces camera-only face registration following successful live liveness detection.
+    Stage D: Register User Endpoint:
+    Enforces camera-only face registration following successful live liveness detection
+    and confirmed temporary face capture in backend RAM.
     Direct API requests without a verified backend liveness session are strictly rejected (HTTP 403).
-    Receives user_id, profile fields (full_name, email, role, phone_number), and the verified live webcam frame.
-    Validates input format, detects and crops face, generates 512-D FaceNet embedding,
-    and commits record into PostgreSQL with FAISS synchronization.
+    Receives user_id, profile fields (full_name, email, role, phone_number), and uses
+    the temporarily stored face frame from RAM (or uploaded verified frame).
+    Validates input format, detects and crops face via MediaPipe BlazeFace,
+    generates 512-D FaceNet embedding, and commits record into PostgreSQL with FAISS synchronization.
     Prevents duplicate user_id and email overwrites with HTTP 409 Conflict.
+    Purges temporary face frames from RAM post-registration.
     """
-    session_mgr = get_liveness_session_manager()
-    is_valid_session, session_err, session = session_mgr.validate_and_consume(
-        session_id=session_id,
-        expected_action="register"
-    )
-    if not is_valid_session:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": "liveness_verification_required", "message": session_err}
-        )
-
     clean_user_id = user_id.strip() if user_id else ""
     if not clean_user_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "Invalid user_id", "message": "User ID cannot be empty."}
+        )
+
+    session_mgr = get_liveness_session_manager()
+    is_valid_session, session_err, session = session_mgr.validate_and_consume(
+        session_id=session_id,
+        expected_action="register",
+        expected_user_id=clean_user_id
+    )
+    if not is_valid_session:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": "liveness_verification_required", "message": session_err}
         )
 
     # Check and validate profile fields if any profile field is provided
@@ -351,6 +576,7 @@ async def register_user_endpoint(
         clean_phone = phone_number.strip() if phone_number else ""
 
         if not clean_full_name or not clean_email or not clean_role or not clean_phone:
+            session.clear_temp_frames()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
@@ -360,6 +586,7 @@ async def register_user_endpoint(
             )
 
         if not EMAIL_REGEX.match(clean_email):
+            session.clear_temp_frames()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"error": "Invalid email", "message": "Invalid email format. Please provide a valid work email address."}
@@ -367,25 +594,29 @@ async def register_user_endpoint(
 
         digits_only = re.sub(r"\D", "", clean_phone)
         if not PHONE_REGEX.match(clean_phone) or len(digits_only) < 7:
+            session.clear_temp_frames()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"error": "Invalid phone", "message": "Invalid phone number format. Please provide a valid contact number."}
             )
 
-    # Read uploaded image bytes
-    image_data = await image.read()
-    if not image_data:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": "Empty file", "message": "Uploaded image file is empty."}
-        )
-
-    # Decode image using OpenCV
-    np_array = np.frombuffer(image_data, np.uint8)
-    img = cv2.imdecode(np_array, cv2.IMREAD_COLOR)
+    # Retrieve face frame: either from optional direct upload or from temporarily stored RAM frames
+    img: np.ndarray | None = None
+    if image is not None:
+        image_data = await image.read()
+        if image_data:
+            np_array = np.frombuffer(image_data, np.uint8)
+            img = cv2.imdecode(np_array, cv2.IMREAD_COLOR)
 
     if img is None or img.size == 0:
-        return {"error": "Invalid image", "message": "Failed to decode image"}
+        img = session.get_primary_temp_frame()
+
+    if img is None or img.size == 0:
+        session.clear_temp_frames()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "no_face_frame", "message": "No verified face frame available in session RAM or upload."}
+        )
 
     # Offload detection, embedding generation, and DB insertion to threadpool
     try:
@@ -396,8 +627,12 @@ async def register_user_endpoint(
             clean_email,
             clean_role,
             clean_phone,
-            img
+            img,
+            session.to_dict()
         )
+        # Always purge temporary frames from RAM immediately following registration
+        session.clear_temp_frames()
+
         if result.get("status") == "liveness_failed":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -418,23 +653,28 @@ async def register_user_endpoint(
             )
         return result
     except HTTPException:
+        session.clear_temp_frames()
         raise
     except UserAlreadyExistsError as exist_err:
+        session.clear_temp_frames()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"error": "User already exists", "message": str(exist_err)}
         )
     except EmailAlreadyExistsError as mail_err:
+        session.clear_temp_frames()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"error": "Email already exists", "message": str(mail_err)}
         )
     except InvalidUserError as inv_err:
+        session.clear_temp_frames()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"error": "Invalid user data", "message": str(inv_err)}
         )
     except Exception as e:
+        session.clear_temp_frames()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "Registration failed", "message": str(e)}

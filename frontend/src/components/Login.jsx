@@ -12,6 +12,7 @@ const LOGIN_STAGES = [
 ];
 
 function Login() {
+  const [userId, setUserId] = useState("");
   const [message, setMessage] = useState("");
   const [statusType, setStatusType] = useState("idle"); // idle | loading | success | error
   const [currentStage, setCurrentStage] = useState(0); // 0 to 7
@@ -31,7 +32,9 @@ function Login() {
       streamRef.current.getTracks().forEach((track) => {
         try {
           track.stop();
-        } catch (_) {}
+        } catch {
+          // ignore track stop error
+        }
       });
       streamRef.current = null;
     }
@@ -80,9 +83,8 @@ function Login() {
     // Stop any existing stream first
     stopCamera();
 
-    let stream = null;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
+      const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           width: { ideal: 640 },
           height: { ideal: 480 },
@@ -124,7 +126,7 @@ function Login() {
       }
 
       // Stabilization pause
-      await delay(600);
+      await delay(500);
 
       if (!video || !video.videoWidth || !video.videoHeight) {
         throw new Error("Unable to read video frame from camera.");
@@ -138,6 +140,9 @@ function Login() {
       // Initiate backend liveness session for 1:N login
       const startFormData = new FormData();
       startFormData.append("action", "login");
+      if (userId.trim()) {
+        startFormData.append("user_id", userId.trim());
+      }
 
       const sessionStartResp = await fetch("http://127.0.0.1:8000/api/liveness/session/start", {
         method: "POST",
@@ -304,7 +309,7 @@ function Login() {
   // Viewfinder dynamic status indicator
   const getViewfinderStatus = () => {
     if (!cameraOn) {
-      return { text: "Sensor Idle", dotClass: "status-dot" };
+      return { text: "Sensor Standby", dotClass: "status-dot" };
     }
     if (currentStage === 3 || statusType === "success") {
       return { text: "Subject Verified", dotClass: "status-dot status-dot-verified" };
@@ -346,7 +351,7 @@ function Login() {
           {/* Authenticated User Banner */}
           <div className="cert-user-banner">
             <div>
-              <div style={{ fontSize: "11px", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "var(--font-mono)" }}>
+              <div className="cert-subject-label">
                 Authenticated Subject
               </div>
               <div className="cert-user-name">{displayName}</div>
@@ -418,6 +423,7 @@ function Login() {
                 setStatusType("idle");
                 setCurrentStage(0);
                 setMessage("");
+                setUserId("");
               }}
               className="btn btn-secondary btn-cert-logout"
             >
@@ -430,93 +436,96 @@ function Login() {
   }
 
   // ==============================================================================
-  // PART 1: Face Login Interface
+  // PART 1: Two-Column Face Login Interface (Default View)
   // ==============================================================================
   return (
     <div className="login-container">
-      {/* Header */}
-      <div className="login-header">
-        <div className="login-header-badges">
-          <span className="badge badge-cyber badge-mono">1:N BIOMETRIC SEARCH</span>
-          <span className="badge badge-mono" style={{ background: "rgba(56, 189, 248, 0.1)", color: "var(--accent-blue)", border: "1px solid rgba(56, 189, 248, 0.3)" }}>
-            ZERO DISK PROBE
-          </span>
-        </div>
-        <h2>Biometric Face Identification</h2>
-        <p>
-          Look directly into the optical sensor. The system performs real-time anti-spoofing verification and matches your identity automatically across the enrolled vector registry.
-        </p>
-      </div>
-
-      <div className="login-content-wrapper">
-        {/* Cyber Viewfinder Frame */}
-        <div
-          className={`login-viewfinder ${cameraOn ? "camera-active" : ""} ${
-            currentStage === 3 || statusType === "success" ? "liveness-verified" : ""
-          } ${statusType === "error" ? "liveness-failed" : ""}`}
-        >
-          {/* Status Overlay */}
-          <div className="login-status-bar">
-            <span className={vStatus.dotClass}></span>
-            <span>{vStatus.text}</span>
+      {/* Two-Column Responsive Layout */}
+      <div className="login-two-col">
+        {/* Left Column: Login Form & Stepper */}
+        <div className="login-left-panel">
+          <div className="login-panel-header">
+            <div className="login-heading-group">
+              <h2 className="login-main-heading">USER AUTHENTICATION</h2>
+              <p className="login-sub-heading">
+                Pure 1:N Face Identification &bull; Zero Password
+              </p>
+            </div>
+            <span className="badge badge-cyber badge-mono">1:N FAISS</span>
           </div>
 
-          {/* Corner Reticle Brackets */}
-          <div className="login-reticle-corner top-left"></div>
-          <div className="login-reticle-corner top-right"></div>
-          <div className="login-reticle-corner bottom-left"></div>
-          <div className="login-reticle-corner bottom-right"></div>
+          {/* Form Fields Area */}
+          <div className="login-form-fields">
+            <div className="field-group">
+              <label className="cyber-label">
+                <span>User ID</span>
+                <span className="field-hint">Optional for 1:N Facial Match</span>
+              </label>
+              <input
+                type="text"
+                className="cyber-input cyber-input-mono"
+                placeholder="Enter User ID (Optional)"
+                value={userId}
+                onChange={(e) => setUserId(e.target.value)}
+                disabled={isLoading}
+                autoComplete="off"
+              />
+              <span className="login-field-helper">
+                Pure 1:N facial search automatically identifies enrolled subjects across the FAISS vector index.
+              </span>
+            </div>
 
-          {/* Centered Face Alignment Target */}
-          <div className="login-alignment-oval">
-            <span>Align Face</span>
+            {/* Primary Action Button: FACE LOGIN */}
+            <button
+              type="button"
+              onClick={handleLoginClick}
+              disabled={isLoading}
+              className="btn btn-primary btn-face-login"
+            >
+              {isLoading ? (
+                <>
+                  <span className="status-dot status-dot-scanning"></span>
+                  <span>Scanning Face &amp; Authenticating...</span>
+                </>
+              ) : (
+                <span>FACE LOGIN</span>
+              )}
+            </button>
           </div>
 
-          {/* Active Webcam Video Stream */}
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            className="login-video-stream"
-            style={{ display: cameraOn ? "block" : "none" }}
-          />
-
-          {/* Idle Placeholder when camera is inactive */}
-          {!cameraOn && (
-            <div className="login-idle-state">
-              <div className="login-idle-icon">🛡️</div>
-              <div className="login-idle-title">Biometric Scanner Standby</div>
-              <div className="login-idle-subtitle">
-                Click authenticate below to initialize optical stream and execute 1:N biometric search.
+          {/* Feedback & Alert Box */}
+          {message && (
+            <div
+              className={`cyber-feedback-box ${
+                statusType === "error"
+                  ? "error"
+                  : statusType === "success"
+                  ? "success"
+                  : "loading"
+              }`}
+            >
+              <div className="feedback-icon">
+                {statusType === "error" && "⚠️"}
+                {statusType === "success" && "✓"}
+                {statusType === "loading" && "●"}
+              </div>
+              <div className="feedback-content">
+                <div>{message}</div>
+                {livenessData && (
+                  <div className="feedback-meta">
+                    Liveness Engine: {livenessData.label || livenessData.status} (Verified)
+                  </div>
+                )}
               </div>
             </div>
           )}
-        </div>
 
-        {/* Primary Action Button: Click to Login */}
-        <button
-          onClick={handleLoginClick}
-          disabled={isLoading}
-          className="btn btn-primary btn-login-submit"
-        >
-          {isLoading ? (
-            <>
-              <span className="status-dot status-dot-scanning"></span>
-              <span>Scanning Face &amp; Authenticating...</span>
-            </>
-          ) : (
-            <span>Authenticate Biometric Access</span>
-          )}
-        </button>
-
-        {/* 7-Step Technical Pipeline Stepper */}
-        {currentStage > 0 && (
+          {/* 7-Step Technical Pipeline Stepper */}
           <div className="login-stepper-panel">
             <div className="login-stepper-header">
               <span className="login-stepper-title">Verification Pipeline</span>
               <span className="badge badge-cyber badge-mono">
-                STAGE {currentStage} OF 7
+                {currentStage > 0 ? `STAGE ${currentStage} OF 7` : "STANDBY"}
               </span>
             </div>
 
@@ -549,34 +558,56 @@ function Login() {
               })}
             </div>
           </div>
-        )}
+        </div>
 
-        {/* Feedback Alert Box */}
-        {message && (
+        {/* Right Column: Face Scanner / Viewfinder */}
+        <div className="login-right-panel">
           <div
-            className={`cyber-feedback-box ${
-              statusType === "error"
-                ? "error"
-                : statusType === "success"
-                ? "success"
-                : "loading"
-            }`}
+            className={`login-viewfinder ${cameraOn ? "camera-active" : ""} ${
+              currentStage === 3 || statusType === "success" ? "liveness-verified" : ""
+            } ${statusType === "error" ? "liveness-failed" : ""}`}
           >
-            <div className="feedback-icon">
-              {statusType === "error" && "⚠️"}
-              {statusType === "success" && "✓"}
-              {statusType === "loading" && "●"}
+            {/* Viewfinder Status Overlay */}
+            <div className="login-status-bar">
+              <span className={vStatus.dotClass}></span>
+              <span>{vStatus.text}</span>
             </div>
-            <div className="feedback-content">
-              <div>{message}</div>
-              {livenessData && (
-                <div className="feedback-meta">
-                  Liveness Engine: {livenessData.label || livenessData.status} (Verified)
+
+            {/* Corner Reticle Brackets */}
+            <div className="login-reticle-corner top-left"></div>
+            <div className="login-reticle-corner top-right"></div>
+            <div className="login-reticle-corner bottom-left"></div>
+            <div className="login-reticle-corner bottom-right"></div>
+
+            {/* Centered Face Alignment Target */}
+            {cameraOn && (
+              <div className="login-alignment-oval">
+                <span>Align Face</span>
+              </div>
+            )}
+
+            {/* Active Webcam Video Stream */}
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="login-video-stream"
+              style={{ display: cameraOn ? "block" : "none" }}
+            />
+
+            {/* Idle Placeholder when camera is inactive */}
+            {!cameraOn && (
+              <div className="login-idle-state">
+                <div className="login-idle-icon">🛡️</div>
+                <div className="login-idle-title">Biometric Scanner Standby</div>
+                <div className="login-idle-subtitle">
+                  Optical sensor is offline. Click <strong>FACE LOGIN</strong> to activate camera stream and start liveness verification.
                 </div>
-              )}
-            </div>
+              </div>
+            )}
           </div>
-        )}
+        </div>
       </div>
     </div>
   );

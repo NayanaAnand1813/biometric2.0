@@ -34,7 +34,31 @@ function UserManagement() {
   };
 
   useEffect(() => {
-    fetchUsers();
+    let ignore = false;
+    async function initUsers() {
+      try {
+        const response = await fetch("http://127.0.0.1:8000/users");
+        if (!response.ok) {
+          throw new Error(`Server returned HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        if (!ignore) {
+          setUsers(data.users || []);
+        }
+      } catch (err) {
+        if (!ignore) {
+          setFeedback({
+            type: "error",
+            message: `Failed to query PostgreSQL registry: ${err.message || "Connection refused"}`
+          });
+        }
+      }
+    }
+
+    initUsers();
+    return () => {
+      ignore = true;
+    };
   }, []);
 
   // Open confirmation dialog

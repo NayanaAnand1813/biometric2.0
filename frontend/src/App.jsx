@@ -24,24 +24,24 @@ function App() {
       {/* Segmented Navigation Switcher */}
       <nav className="cyber-nav-container" aria-label="Terminal Navigation">
         <button
-          onClick={() => setActiveTab("register")}
-          className={`cyber-nav-tab ${activeTab === "register" ? "active" : ""}`}
-        >
-          Registration
-        </button>
-
-        <button
           onClick={() => setActiveTab("login")}
           className={`cyber-nav-tab ${activeTab === "login" ? "active" : ""}`}
         >
-          Face Login
+          LOGIN
+        </button>
+
+        <button
+          onClick={() => setActiveTab("register")}
+          className={`cyber-nav-tab ${activeTab === "register" ? "active" : ""}`}
+        >
+          REGISTER
         </button>
 
         <button
           onClick={() => setActiveTab("users")}
           className={`cyber-nav-tab ${activeTab === "users" ? "active" : ""}`}
         >
-          Manage Users
+          USER MANAGEMENT
         </button>
       </nav>
 
